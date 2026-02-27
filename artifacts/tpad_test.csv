@@ -1,0 +1,4 @@
+parcel_id,owner_name,owner_type,property_address,city,state,zip,year_built,appraised_value
+047P-A-012.00,John Smith,person,123 Main St,Knoxville,TN,37919,1985,325000
+047P-A-013.00,ABC Holdings LLC,llc,456 Oak Ave,Knoxville,TN,37917,2002,575000
+047P-A-014.00,Mary Johnson,person,789 Pine Rd,Knoxville,TN,37912,1994,410000
