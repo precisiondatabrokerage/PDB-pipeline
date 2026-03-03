@@ -46,6 +46,7 @@ def run_tpad(file_path: str, county: str | None = None):
         file_path=file_path,
         source_key=source_key,
         county=county,
+        
     )
 
     print("\n✅ TPAD ingestion complete")
