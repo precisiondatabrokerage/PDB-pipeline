@@ -46,5 +46,5 @@ def validate_source(source_key: str) -> bool:
     # if last_review and (utcnow() - last_review).days > 180:
     #     raise ComplianceError("Legal review expired for source")
 
-    print(f"✅ Compliance validated for source: {source_key}")
+    print(f"Compliance validated for source: {source_key}")
     return True
