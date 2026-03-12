@@ -1,226 +1,325 @@
-# =====================================================
-# PDB-PIPELINE/runners/run_tpad_end_to_end.py
+# pdb-pipeline/runners/run_tpad_end_to_end.py
+
+# ======================================================
+# HOW TO RUN
 #
-# End-to-End TPAD Runner
-#
-# Runs the complete pipeline:
-#
-#   1️⃣ TPAD Ingestion
-#   2️⃣ ETL (resolve + canonical insert)
-#   3️⃣ Company Expansion Apply
-#   4️⃣ Company Contact Discovery
-#   5️⃣ Prospect Enrichment
-#   6️⃣ Prospect Contact Enrichment
-#   7️⃣ Trigger Engine
-#   8️⃣ Prospect Scoring
-#
-# Single command orchestration.
-#
-# =====================================================
+# $env:APP_ENV="production"
+# python -u -m runners.run_tpad_end_to_end --file artifacts/sevier_main_1_2026_03_10.csv --county Sevier --parcel-detail --jur 078 --parcel-limit 0 --resume
+# ======================================================
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 import time
-import re
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional
 
-# Ensure UTF-8 stdout on Windows
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+# ======================================================
+# Paths / environment
+# ======================================================
+
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+ETL_ROOT = Path(os.getenv("PDB_ETL_ROOT") or (PIPELINE_ROOT.parent / "pdb-etl")).resolve()
+
+sys.path.insert(0, str(PIPELINE_ROOT))
 
 
-# -----------------------------------------------------
-# Helper: run subprocess with streaming output
-# -----------------------------------------------------
+def utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-def run_cmd(cmd: list[str], cwd: Path) -> None:
 
-    print(f"\n[runner] executing: {' '.join(cmd)}")
+# ======================================================
+# Optional .env load (pipeline repo uses dotenv style)
+# ======================================================
+
+def _load_env():
+    try:
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv(PIPELINE_ROOT / ".env", override=False)
+    except Exception:
+        pass
+
+
+_load_env()
+
+
+# ======================================================
+# Postgres checkpoint helpers (best-effort)
+# ======================================================
+
+def _get_checkpoint_dsn() -> Optional[str]:
+    return os.getenv("SUPABASE_POSTGRES_URL") or os.getenv("POSTGRES_DSN")
+
+
+def _with_pg(fn):
+    dsn = _get_checkpoint_dsn()
+    if not dsn:
+        return None
+    try:
+        import psycopg2  # type: ignore
+        conn = psycopg2.connect(dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("set search_path to public")
+                out = fn(conn, cur)
+            conn.commit()
+            return out
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def checkpoint_get(run_id: str, stage_key: str) -> Optional[Dict[str, Any]]:
+    def _q(conn, cur):
+        cur.execute(
+            """
+            SELECT status, started_at, completed_at, meta, updated_at
+            FROM public.run_stage_checkpoints
+            WHERE run_id=%s AND stage_key=%s
+            """,
+            (run_id, stage_key),
+        )
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "status": r[0],
+            "started_at": r[1].isoformat() if r[1] else None,
+            "completed_at": r[2].isoformat() if r[2] else None,
+            "meta": r[3] or {},
+            "updated_at": r[4].isoformat() if r[4] else None,
+        }
+
+    return _with_pg(_q)
+
+
+def checkpoint_set(run_id: str, stage_key: str, status: str, meta: Optional[dict] = None):
+    meta = meta or {}
+
+    def _q(conn, cur):
+        cur.execute(
+            """
+            INSERT INTO public.run_stage_checkpoints
+              (run_id, stage_key, status, started_at, completed_at, meta, updated_at)
+            VALUES
+              (%s, %s, %s, now(), CASE WHEN %s='completed' THEN now() ELSE NULL END, %s::jsonb, now())
+            ON CONFLICT (run_id, stage_key)
+            DO UPDATE SET
+              status = EXCLUDED.status,
+              completed_at = CASE WHEN EXCLUDED.status='completed' THEN now() ELSE public.run_stage_checkpoints.completed_at END,
+              meta = COALESCE(public.run_stage_checkpoints.meta,'{}'::jsonb) || EXCLUDED.meta,
+              updated_at = now()
+            """,
+            (run_id, stage_key, status, status, json.dumps(meta)),
+        )
+        return True
+
+    _with_pg(_q)
+
+
+# ======================================================
+# Subprocess runner
+# ======================================================
+
+def run_cmd(cmd: list[str], cwd: Path):
+    print(f"[runner] executing: {' '.join(cmd)}")
     print(f"[runner] cwd={cwd}")
-
-    start = time.time()
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    for line in proc.stdout:
-        print(line.rstrip())
-
-    proc.wait()
-
-    elapsed = round(time.time() - start, 2)
-
+    proc = subprocess.run(cmd, cwd=str(cwd))
     if proc.returncode != 0:
         raise RuntimeError(f"command failed (exit={proc.returncode})")
 
-    print(f"[runner] completed in {elapsed}s")
 
-
-# -----------------------------------------------------
-# TPAD ingestion
-# -----------------------------------------------------
-
-def run_tpad_ingestion(file: str, county: str | None, pipeline_root: Path) -> str:
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "runners.run_tpad_source",
-        "--file",
-        file,
-    ]
-
-    if county:
-        cmd += ["--county", county]
-
-    print("\n[runner] starting TPAD ingestion")
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(pipeline_root),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    output_lines = []
-
-    for line in proc.stdout:
-        line = line.rstrip()
-        print(line)
-        output_lines.append(line)
-
-    proc.wait()
-
-    if proc.returncode != 0:
-        raise RuntimeError("TPAD ingestion failed")
-
-    # -------------------------------------------------
-    # Robust run_id detection (UUID search)
-    # -------------------------------------------------
-
-    uuid_pattern = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-
-    matches = []
-
-    for line in output_lines:
-        matches.extend(re.findall(uuid_pattern, line))
-
-    if not matches:
-        raise RuntimeError("Could not parse run_id from ingestion output")
-
-    run_id = matches[-1]
-
-    print(f"\n[runner] detected run_id → {run_id}")
-
-    return run_id
-
-
-# -----------------------------------------------------
-# ETL runner
-# -----------------------------------------------------
-
-def run_etl(run_id: str, etl_root: Path) -> None:
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "runners.run_etl_for_run_id",
-        "--run-id",
-        run_id,
-    ]
-
-    print("\n[runner] starting ETL")
-
-    run_cmd(cmd, etl_root)
-
-
-# -----------------------------------------------------
-# Main orchestration
-# -----------------------------------------------------
+# ======================================================
+# Main
+# ======================================================
 
 def main():
-
     parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--file",
-        required=True,
-        help="TPAD CSV export file",
-    )
-
-    parser.add_argument(
-        "--county",
-        required=False,
-        help="County name override",
-    )
-
-    parser.add_argument(
-        "--pipeline-root",
-        default=".",
-        help="Path to pipeline repo",
-    )
-
-    parser.add_argument(
-        "--etl-root",
-        default="../pdb-etl",
-        help="Path to etl repo",
-    )
+    parser.add_argument("--file", required=True, help="TPAD CSV file path (relative to pipeline repo)")
+    parser.add_argument("--county", required=True, help="County name (e.g. Sevier)")
+    parser.add_argument("--parcel-detail", action="store_true", help="Enable parcel drilldown + apply")
+    parser.add_argument("--jur", default=None, help="Jurisdiction code (e.g. 078). Required if --parcel-detail")
+    parser.add_argument("--parcel-limit", type=int, default=0, help="0 = all parcels for run, else limit N")
+    parser.add_argument("--parcel-sleep", type=float, default=0.35)
+    parser.add_argument("--parcel-timeout", type=int, default=20)
+    parser.add_argument("--resume", action="store_true", help="Use run_stage_checkpoints to skip completed stages")
 
     args = parser.parse_args()
 
-    pipeline_root = Path(args.pipeline_root).resolve()
-    etl_root = Path(args.etl_root).resolve()
+    if args.parcel_detail and not args.jur:
+        raise SystemExit("--jur is required when --parcel-detail is enabled")
 
     print("\n==============================")
     print(" PDB TPAD END-TO-END RUNNER")
     print("==============================")
+    print(f"pipeline_root: {PIPELINE_ROOT}")
+    print(f"etl_root: {ETL_ROOT}")
+    print(f"started_at: {utcnow()}")
+    print()
 
-    print(f"pipeline_root: {pipeline_root}")
-    print(f"etl_root: {etl_root}")
+    start_time = time.time()
 
-    overall_start = time.time()
+    # --------------------------------------------------
+    # Stage 1: TPAD ingestion into Mongo raw_property_records
+    # --------------------------------------------------
+    # NOTE: pipeline repo uses runners.run_tpad_source (not run_tpad_ingestion)
+    ingest_cmd = [
+        sys.executable,
+        "-u",
+        "-m",
+        "runners.run_tpad_source",
+        "--file",
+        args.file,
+        "--county",
+        args.county,
+    ]
 
-    # -------------------------------------------------
-    # Step 1 — Ingestion
-    # -------------------------------------------------
+    print("[runner] starting TPAD ingestion")
+    print("RUNNING TPAD INGESTION AGAINST MONGO RAW LAYER")
+    print(f"File: {args.file}")
+    print(f"County: {args.county}")
 
-    run_id = run_tpad_ingestion(
-        file=args.file,
-        county=args.county,
-        pipeline_root=pipeline_root,
+    proc = subprocess.run(
+        ingest_cmd,
+        cwd=str(PIPELINE_ROOT),
+        capture_output=True,
+        text=True,
     )
 
-    # -------------------------------------------------
-    # Step 2 — ETL
-    # -------------------------------------------------
+    if proc.stdout:
+        print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+    if proc.stderr:
+        print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr)
 
-    run_etl(
-        run_id=run_id,
-        etl_root=etl_root,
-    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"TPAD ingestion failed (exit={proc.returncode})")
 
-    elapsed = round(time.time() - overall_start, 2)
+    run_id = None
+    for line in (proc.stdout or "").splitlines():
+        if "Run ID:" in line:
+            run_id = line.split("Run ID:", 1)[1].strip()
+            break
 
+    if not run_id:
+        raise RuntimeError("Could not parse Run ID from TPAD ingestion output")
+
+    print(f"[runner] detected run_id → {run_id}")
+
+    if args.resume:
+        checkpoint_set(run_id, "tpad_raw_ingest", "completed", {"file": args.file, "county": args.county})
+
+    # --------------------------------------------------
+    # Stage 2: Parcel detail drilldown → Mongo raw_parcel_details
+    # --------------------------------------------------
+    if args.parcel_detail:
+        stage_key = "parcel_detail_source"
+        if args.resume:
+            ck = checkpoint_get(run_id, stage_key)
+            if ck and ck.get("status") == "completed":
+                print(f"[runner] checkpoint skip: {stage_key} already completed")
+            else:
+                checkpoint_set(run_id, stage_key, "started", {"jur": args.jur, "limit": args.parcel_limit})
+                try:
+                    limit = int(args.parcel_limit)
+                    cmd = [
+                        sys.executable,
+                        "-u",
+                        "-m",
+                        "runners.run_tpad_parcel_detail_source",
+                        "--run-id",
+                        run_id,
+                        "--jur",
+                        str(args.jur),
+                        "--sleep",
+                        str(args.parcel_sleep),
+                        "--timeout",
+                        str(args.parcel_timeout),
+                        "--limit",
+                        str(limit if limit > 0 else 0),
+                    ]
+                    run_cmd(cmd, PIPELINE_ROOT)
+                    checkpoint_set(run_id, stage_key, "completed", {"jur": args.jur, "limit": args.parcel_limit})
+                except Exception as e:
+                    checkpoint_set(run_id, stage_key, "failed", {"error": str(e)})
+                    raise
+        else:
+            limit = int(args.parcel_limit)
+            cmd = [
+                sys.executable,
+                "-u",
+                "-m",
+                "runners.run_tpad_parcel_detail_source",
+                "--run-id",
+                run_id,
+                "--jur",
+                str(args.jur),
+                "--sleep",
+                str(args.parcel_sleep),
+                "--timeout",
+                str(args.parcel_timeout),
+                "--limit",
+                str(limit if limit > 0 else 0),
+            ]
+            run_cmd(cmd, PIPELINE_ROOT)
+
+    # --------------------------------------------------
+    # Stage 3: TPAD ETL → Postgres canonical insert
+    # --------------------------------------------------
+    stage_key = "tpad_etl"
+    if args.resume:
+        ck = checkpoint_get(run_id, stage_key)
+        if ck and ck.get("status") == "completed":
+            print(f"[runner] checkpoint skip: {stage_key} already completed")
+        else:
+            checkpoint_set(run_id, stage_key, "started", {})
+            try:
+                print("\n[runner] starting ETL\n")
+                etl_cmd = [sys.executable, "-u", "-m", "runners.run_etl_for_run_id", "--run-id", run_id]
+                run_cmd(etl_cmd, ETL_ROOT)
+                checkpoint_set(run_id, stage_key, "completed", {})
+            except Exception as e:
+                checkpoint_set(run_id, stage_key, "failed", {"error": str(e)})
+                raise
+    else:
+        print("\n[runner] starting ETL\n")
+        etl_cmd = [sys.executable, "-u", "-m", "runners.run_etl_for_run_id", "--run-id", run_id]
+        run_cmd(etl_cmd, ETL_ROOT)
+
+    # --------------------------------------------------
+    # Stage 4: Parcel detail apply → Postgres enrichment tables
+    # --------------------------------------------------
+    if args.parcel_detail:
+        stage_key = "parcel_detail_apply"
+        if args.resume:
+            ck = checkpoint_get(run_id, stage_key)
+            if ck and ck.get("status") == "completed":
+                print(f"[runner] checkpoint skip: {stage_key} already completed")
+            else:
+                checkpoint_set(run_id, stage_key, "started", {"jur": args.jur})
+                try:
+                    cmd = [sys.executable, "-u", "-m", "runners.run_parcel_detail_etl_for_run_id", "--run-id", run_id]
+                    run_cmd(cmd, ETL_ROOT)
+                    checkpoint_set(run_id, stage_key, "completed", {"jur": args.jur})
+                except Exception as e:
+                    checkpoint_set(run_id, stage_key, "failed", {"error": str(e)})
+                    raise
+        else:
+            cmd = [sys.executable, "-u", "-m", "runners.run_parcel_detail_etl_for_run_id", "--run-id", run_id]
+            run_cmd(cmd, ETL_ROOT)
+
+    elapsed = time.time() - start_time
     print("\n======================================")
     print(" PIPELINE COMPLETE")
     print("======================================")
-
     print(f"run_id: {run_id}")
-    print(f"total runtime: {elapsed}s")
+    print(f"total runtime: {elapsed:.2f}s")
 
-
-# -----------------------------------------------------
 
 if __name__ == "__main__":
     main()
