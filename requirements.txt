@@ -1,6 +1,7 @@
 requests
 beautifulsoup4
 playwright
+playwright-stealth
 duckdb
 psycopg2-binary
 python-dotenv
