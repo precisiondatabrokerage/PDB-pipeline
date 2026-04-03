@@ -6,7 +6,7 @@ import inspect
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 from dotenv import load_dotenv
@@ -14,28 +14,57 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# -----------------------------------------------------
+# Environment bootstrap
+# -----------------------------------------------------
+# Base env first, then environment-specific override.
 load_dotenv()
+load_dotenv(PROJECT_ROOT / ".env", override=True)
+
+APP_ENV = (os.getenv("APP_ENV") or "local").strip().lower()
+if APP_ENV == "production":
+    load_dotenv(PROJECT_ROOT / ".env.production", override=True)
+else:
+    load_dotenv(PROJECT_ROOT / ".env.local", override=True)
 
 from db.mongo_client import get_mongo  # noqa: E402
 
 
 def get_pg_conn():
-    dsn = (
-        os.getenv("POSTGRES_DSN")
-        or os.getenv("SUPABASE_POSTGRES_URL")
-        or os.getenv("DATABASE_URL")
-    )
+    """
+    Production must prefer the production canonical DB.
+    Local/dev can prefer local DSNs.
+    """
+    app_env = (os.getenv("APP_ENV") or "local").strip().lower()
+
+    if app_env == "production":
+        dsn = (
+            os.getenv("SUPABASE_POSTGRES_URL")
+            or os.getenv("DATABASE_URL")
+            or os.getenv("POSTGRES_DSN")
+        )
+    else:
+        dsn = (
+            os.getenv("POSTGRES_DSN")
+            or os.getenv("DATABASE_URL")
+            or os.getenv("SUPABASE_POSTGRES_URL")
+        )
+
     if not dsn:
         raise RuntimeError(
-            "No Postgres DSN found. Set POSTGRES_DSN or SUPABASE_POSTGRES_URL or DATABASE_URL."
+            f"No Postgres DSN found for APP_ENV={app_env}. "
+            "Expected SUPABASE_POSTGRES_URL for production or "
+            "POSTGRES_DSN/DATABASE_URL for local."
         )
+
     return psycopg2.connect(dsn)
 
 
+# =====================================================
+# Mongo helpers
+# =====================================================
+
 def get_raw_company_entity_expansion_collection():
-    """
-    Resolve the Mongo collection safely across different helper return shapes.
-    """
     mongo = get_mongo()
 
     coll = getattr(mongo, "raw_company_entity_expansion", None)
@@ -61,6 +90,10 @@ def get_raw_company_entity_expansion_collection():
         "Could not resolve Mongo collection 'raw_company_entity_expansion' from get_mongo()."
     )
 
+
+# =====================================================
+# Import loader
+# =====================================================
 
 def load_expand_fn():
     candidates = [
@@ -88,6 +121,10 @@ def load_expand_fn():
     ) from last_err
 
 
+# =====================================================
+# CLI helpers
+# =====================================================
+
 def _parse_company_ids(raw: Optional[str]) -> List[int]:
     if not raw:
         return []
@@ -101,12 +138,146 @@ def _parse_company_ids(raw: Optional[str]) -> List[int]:
     return out
 
 
+# =====================================================
+# Dataset schema detection
+# =====================================================
+
+def _get_dataset_scope_mode() -> Tuple[bool, bool]:
+    """
+    Returns:
+      (has_run_id_column, has_notes_column)
+
+    We support both dataset lineage shapes:
+    - new: public.datasets.run_id
+    - old: public.datasets.notes with "run_id=<uuid>" marker
+    """
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select column_name
+                from information_schema.columns
+                where table_schema = 'public'
+                  and table_name = 'datasets'
+                """
+            )
+            cols = {row[0] for row in cur.fetchall()}
+            return ("run_id" in cols, "notes" in cols)
+    finally:
+        conn.close()
+
+
+def _build_dataset_scope_sql(parent_run_id: str) -> Tuple[str, str, Tuple[Any, ...]]:
+    """
+    Returns:
+      where_sql_fragment,
+      selected_dataset_ref_sql,
+      params_tuple
+
+    selected_dataset_ref_sql is used for preview/debug output.
+    """
+    has_run_id, has_notes = _get_dataset_scope_mode()
+
+    if has_run_id:
+        return (
+            " AND d.run_id = %s ",
+            "d.run_id AS dataset_run_ref",
+            (parent_run_id,),
+        )
+
+    if has_notes:
+        return (
+            " AND d.notes ILIKE %s ",
+            "d.notes AS dataset_run_ref",
+            (f"%run_id={parent_run_id}%",),
+        )
+
+    raise RuntimeError(
+        "public.datasets has neither run_id nor notes columns. "
+        "Cannot derive parent-run lineage for run-scoped company expansion."
+    )
+
+
+# =====================================================
+# Postgres target debug
+# =====================================================
+
+def debug_pg_target(parent_run_id: str) -> None:
+    """
+    Print exactly which DB this runner is hitting and whether the run cohort
+    is visible there.
+    """
+    where_scope_sql, _, scope_params = _build_dataset_scope_sql(parent_run_id)
+
+    dataset_sql = f"""
+        SELECT count(*)
+        FROM public.datasets d
+        WHERE 1=1
+        {where_scope_sql}
+    """
+
+    companies_sql = f"""
+        SELECT count(*)
+        FROM public.companies c
+        JOIN public.datasets d
+          ON d.id = c.dataset_id
+        WHERE 1=1
+        {where_scope_sql}
+    """
+
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select current_database(), current_user")
+            db_name, db_user = cur.fetchone()
+
+            cur.execute(dataset_sql, scope_params)
+            dataset_count = cur.fetchone()[0]
+
+            cur.execute(companies_sql, scope_params)
+            company_count = cur.fetchone()[0]
+
+        print("======================================")
+        print(" POSTGRES TARGET DEBUG")
+        print("======================================")
+        print(f"APP_ENV: {APP_ENV}")
+        print(f"current_database: {db_name}")
+        print(f"current_user: {db_user}")
+        print(f"datasets_for_run: {dataset_count}")
+        print(f"companies_for_run: {company_count}")
+    finally:
+        conn.close()
+
+
+# =====================================================
+# Candidate selection
+# =====================================================
+
 def fetch_company_candidates(
+    *,
+    parent_run_id: str,
     limit: int,
     company_ids: Optional[List[int]] = None,
     require_missing_enrichment: bool = False,
+    restrict_to_parent_run_companies: bool = True,
 ) -> List[Dict[str, Any]]:
-    sql = """
+    """
+    Day 2 doctrine:
+    - By default, select only companies created by the supplied parent run.
+    - Primary lineage path: public.companies.dataset_id -> public.datasets.run_id
+    - Legacy fallback: public.companies.dataset_id -> public.datasets.notes contains run_id marker
+    - company_ids remains supported for surgical reruns
+    - To intentionally target backlog companies, caller must pass restrict_to_parent_run_companies=False
+    """
+    where_scope_sql = ""
+    dataset_run_ref_sql = "NULL::text AS dataset_run_ref"
+    scope_params: Tuple[Any, ...] = ()
+
+    if restrict_to_parent_run_companies:
+        where_scope_sql, dataset_run_ref_sql, scope_params = _build_dataset_scope_sql(parent_run_id)
+
+    sql = f"""
         SELECT
             c.id,
             c.canonical_name,
@@ -116,11 +287,17 @@ def fetch_company_candidates(
             c.email_primary,
             c.contact_form_url,
             c.mailing_city,
-            c.mailing_state
+            c.mailing_state,
+            c.dataset_id,
+            {dataset_run_ref_sql}
         FROM public.companies c
+        LEFT JOIN public.datasets d
+          ON d.id = c.dataset_id
         WHERE 1=1
+        {where_scope_sql}
     """
-    params: List[Any] = []
+
+    params: List[Any] = list(scope_params)
 
     if company_ids:
         sql += " AND c.id = ANY(%s)"
@@ -152,6 +329,10 @@ def fetch_company_candidates(
     finally:
         conn.close()
 
+
+# =====================================================
+# Expansion call wiring
+# =====================================================
 
 def _build_expand_kwargs(
     expand_fn,
@@ -203,9 +384,13 @@ def _call_expand_fn(
     params = list(sig.parameters.values())
 
     required_positional = [
-        p for p in params
+        p
+        for p in params
         if p.default is inspect._empty
-        and p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and p.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
     ]
 
     if len(required_positional) == 1:
@@ -220,30 +405,21 @@ def _call_expand_fn(
     )
 
 
-def _is_document(value: Any) -> bool:
-    return isinstance(value, dict)
-
+# =====================================================
+# Payload normalization
+# =====================================================
 
 def _iter_documents_from_payload(
     payload: Any,
     row: Dict[str, Any],
     parent_run_id: str,
 ) -> List[Dict[str, Any]]:
-    """
-    Normalize arbitrary enricher return shapes into Mongo-insertable documents.
-    Accepted:
-    - dict
-    - list/tuple of dicts
-    - wrapper dict with keys like payload/doc/document/raw/result/results/items/documents
-    Everything else is skipped.
-    """
     docs: List[Dict[str, Any]] = []
 
     if payload is None:
         return docs
 
     if isinstance(payload, dict):
-        # Direct document
         if payload:
             docs.append(payload)
             return docs
@@ -258,7 +434,6 @@ def _iter_documents_from_payload(
                         docs.append(sub)
         return docs
 
-    # Objects that expose a dict-like body
     if hasattr(payload, "__dict__"):
         obj_dict = dict(payload.__dict__)
         if obj_dict:
@@ -289,7 +464,6 @@ def _iter_documents_from_payload(
                 if docs:
                     return docs
 
-        # Last resort: if it's a metadata wrapper, wrap it as a raw record
         docs.append(
             {
                 "parent_run_id": parent_run_id,
@@ -316,22 +490,33 @@ def _ensure_minimum_metadata(
     out.setdefault("canonical_name", row.get("canonical_name"))
     out.setdefault("mailing_city", row.get("mailing_city"))
     out.setdefault("mailing_state", row.get("mailing_state"))
+    out.setdefault("dataset_id", row.get("dataset_id"))
+    out.setdefault("dataset_run_ref", row.get("dataset_run_ref"))
 
     return out
 
+
+# =====================================================
+# Main runner
+# =====================================================
 
 def run_company_expansion(
     parent_run_id: str,
     limit: int,
     company_ids: Optional[List[int]] = None,
     require_missing_enrichment: bool = False,
+    restrict_to_parent_run_companies: bool = True,
 ) -> None:
     expand_company_entity_v1 = load_expand_fn()
 
+    debug_pg_target(parent_run_id)
+
     rows = fetch_company_candidates(
+        parent_run_id=parent_run_id,
         limit=limit,
         company_ids=company_ids,
         require_missing_enrichment=require_missing_enrichment,
+        restrict_to_parent_run_companies=restrict_to_parent_run_companies,
     )
 
     print("======================================")
@@ -340,6 +525,7 @@ def run_company_expansion(
     print(f"parent_run_id: {parent_run_id}")
     print(f"limit: {limit}")
     print(f"require_missing_enrichment: {require_missing_enrichment}")
+    print(f"restrict_to_parent_run_companies: {restrict_to_parent_run_companies}")
     print(f"selected_companies: {len(rows)}")
 
     if rows:
@@ -348,12 +534,21 @@ def run_company_expansion(
             print(
                 f"  company_id={r['id']} "
                 f"name={r.get('canonical_name')} "
+                f"dataset_id={r.get('dataset_id')} "
+                f"dataset_run_ref={r.get('dataset_run_ref')} "
                 f"website={r.get('website')} "
                 f"domain={r.get('domain')} "
                 f"phone={r.get('phone_primary')} "
                 f"email={r.get('email_primary')} "
                 f"form={r.get('contact_form_url')}"
             )
+    else:
+        print(
+            "[preview] no companies selected. "
+            "If this is unexpected, verify that public.companies.dataset_id "
+            "links to public.datasets and that datasets has either run_id "
+            "or notes containing run_id=<parent_run_id>."
+        )
 
     raw_coll = get_raw_company_entity_expansion_collection()
 
@@ -396,31 +591,28 @@ def run_company_expansion(
                 print(
                     f"[skip] company_id={row['id']} "
                     f"name={row.get('canonical_name')} "
-                    "reason=normalized_documents_empty"
+                    f"reason=no_prepared_documents"
                 )
                 continue
 
-            if len(prepared_docs) == 1:
-                raw_coll.insert_one(prepared_docs[0])
-                written += 1
-            else:
-                raw_coll.insert_many(prepared_docs, ordered=False)
-                written += len(prepared_docs)
+            raw_coll.insert_many(prepared_docs)
+            written += len(prepared_docs)
 
             print(
                 f"[ok] company_id={row['id']} "
                 f"name={row.get('canonical_name')} "
+                f"dataset_run_ref={row.get('dataset_run_ref')} "
                 f"docs_written={len(prepared_docs)}"
             )
 
         except Exception as e:
             errors += 1
             print(
-                f"[error] company_id={row['id']} "
+                f"[error] company_id={row.get('id')} "
                 f"name={row.get('canonical_name')} "
-                f"{type(e).__name__}: {e}"
+                f"type={type(e).__name__} "
+                f"msg={e}"
             )
-            continue
 
     print("\n======================================")
     print(" COMPANY ENTITY EXPANSION COMPLETE")
@@ -432,21 +624,55 @@ def run_company_expansion(
     print("Next: run ETL apply for the same parent_run_id.")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--parent-run-id", required=True)
-    parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--company-ids", type=str, default=None)
-    parser.add_argument("--require-missing-enrichment", action="store_true")
-    args = parser.parse_args()
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run company entity expansion and write raw expansion docs to Mongo."
+    )
+    parser.add_argument(
+        "--parent-run-id",
+        required=True,
+        help="Canonical parent run_id whose companies should be expanded.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum number of companies to expand.",
+    )
+    parser.add_argument(
+        "--company-ids",
+        type=str,
+        default=None,
+        help="Optional comma-separated company IDs for surgical reruns.",
+    )
+    parser.add_argument(
+        "--require-missing-enrichment",
+        action="store_true",
+        help="Only select companies missing website/domain/phone/email/contact_form.",
+    )
 
-    company_ids = _parse_company_ids(args.company_ids)
+    parser.set_defaults(restrict_to_parent_run_companies=True)
+    parser.add_argument(
+        "--restrict-to-parent-run-companies",
+        dest="restrict_to_parent_run_companies",
+        action="store_true",
+        help="Restrict selection to companies created by the supplied parent run. Default behavior.",
+    )
+    parser.add_argument(
+        "--all-companies",
+        dest="restrict_to_parent_run_companies",
+        action="store_false",
+        help="Disable run scoping and allow backlog-wide selection.",
+    )
+
+    args = parser.parse_args()
 
     run_company_expansion(
         parent_run_id=args.parent_run_id,
-        limit=args.limit,
-        company_ids=company_ids,
-        require_missing_enrichment=args.require_missing_enrichment,
+        limit=int(args.limit),
+        company_ids=_parse_company_ids(args.company_ids),
+        require_missing_enrichment=bool(args.require_missing_enrichment),
+        restrict_to_parent_run_companies=bool(args.restrict_to_parent_run_companies),
     )
 
 
