@@ -1,198 +1,159 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional
+from typing import Optional
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-SEARCH_URL = "https://tnbear.tn.gov/Ecommerce/FilingSearch.aspx"
+SEARCH_URL = "https://tncab.tnsos.gov/business-entity-search"
 
-LABEL_MAP = {
-    "status": "business_status",
-    "current status": "business_status",
-    "filing date": "business_start_date",
-    "formation date": "business_start_date",
-    "initial filing date": "business_start_date",
-    "entity type": "entity_type",
-    "registered agent": "registered_agent",
+RETURN_TEMPLATE = {
+    "business_status": None,
+    "business_start_date": None,
+    "registered_agent": None,
+    "entity_type": None,
+    "industry_attributes": {},
+    "source_url": SEARCH_URL,
+    "matched_name": None,
+    "control_number": None,
+    "principal_address": None,
+    "source_status": "unknown",
 }
 
-TEXT_LABEL_PATTERNS = {
-    "business_status": [
-        r"current status\s*:?\s*([^\n]+)",
-        r"status\s*:?\s*([^\n]+)",
-    ],
-    "business_start_date": [
-        r"initial filing date\s*:?\s*([^\n]+)",
-        r"formation date\s*:?\s*([^\n]+)",
-        r"filing date\s*:?\s*([^\n]+)",
-    ],
-    "registered_agent": [
-        r"registered agent\s*:?\s*([^\n]+)",
-    ],
-    "entity_type": [
-        r"entity type\s*:?\s*([^\n]+)",
-    ],
+FIELD_PATTERNS = {
+    "entity_type": re.compile(r"^Entity Type:\s*(.+)$", re.I),
+    "business_status": re.compile(r"^Status:\s*(.+)$", re.I),
+    "control_number": re.compile(r"^Control Number:\s*(.+)$", re.I),
+    "business_start_date": re.compile(r"^Initial Filing Date:\s*(.+)$", re.I),
 }
 
 
-def _normalize_space(text: str) -> str:
+def _normalize_space(text: str | None) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
-def _first_visible(page, selectors):
-    for sel in selectors:
-        try:
-            loc = page.locator(sel)
-            if loc.count() > 0 and loc.first.is_visible():
-                return loc.first
-        except Exception:
-            continue
+def _empty_result(status: str) -> dict:
+    out = dict(RETURN_TEMPLATE)
+    out["source_status"] = status
+    return out
+
+
+def _find_suffix(page) -> Optional[str]:
+    ids = page.eval_on_selector_all(
+        "input[id^='Name_']",
+        "els => els.map(e => e.id)",
+    )
+    for val in ids:
+        if isinstance(val, str) and val.startswith("Name_"):
+            return val.split("Name_", 1)[1]
     return None
 
 
-def _extract_table_pairs(soup: BeautifulSoup) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-
-    for row in soup.select("tr"):
-        cells = row.find_all(["th", "td"])
-        if len(cells) < 2:
-            continue
-
-        label = _normalize_space(cells[0].get_text(" ", strip=True)).lower().rstrip(":")
-        value = _normalize_space(cells[1].get_text(" ", strip=True))
-        if not label or not value:
-            continue
-
-        if label in LABEL_MAP:
-            out[LABEL_MAP[label]] = value
-
-    return out
-
-
-def _extract_text_patterns(text: str) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-
-    for key, patterns in TEXT_LABEL_PATTERNS.items():
-        for pattern in patterns:
-            m = re.search(pattern, text, flags=re.I)
-            if m:
-                value = _normalize_space(m.group(1))
-                if value:
-                    out[key] = value
-                    break
-
-    return out
-
-
-def _parse_detail_html(html: str) -> Dict[str, Optional[str]]:
+def _parse_detail_html(html: str, current_url: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
-    page_text = soup.get_text("\n", strip=True)
 
-    data = {
-        "business_status": None,
-        "business_start_date": None,
-        "registered_agent": None,
-        "entity_type": None,
-        "industry_attributes": {},
-        "source_url": SEARCH_URL,
-    }
+    out = dict(RETURN_TEMPLATE)
+    out["source_url"] = current_url or SEARCH_URL
+    out["source_status"] = "parsed"
 
-    data.update(_extract_table_pairs(soup))
-    data.update(_extract_text_patterns(page_text))
+    details_root = soup.select_one("#KendoWindowLevel1 #business-details") or soup.select_one("#business-details")
+    if details_root is None:
+        out["source_status"] = "details_not_found"
+        return out
 
-    return data
+    title = details_root.select_one("h2")
+    if title:
+        out["matched_name"] = _normalize_space(title.get_text(" ", strip=True)) or None
+
+    for h4 in details_root.select("h4"):
+        line = _normalize_space(h4.get_text(" ", strip=True))
+        if not line:
+            continue
+        for key, rx in FIELD_PATTERNS.items():
+            m = rx.match(line)
+            if m:
+                out[key] = _normalize_space(m.group(1)) or None
+                break
+
+    for col in details_root.select(".col-md-4, .col-md-6"):
+        heading_el = col.select_one("h4")
+        heading = _normalize_space(heading_el.get_text(" ", strip=True) if heading_el else "")
+        lines = [
+            _normalize_space(h.get_text(" ", strip=True))
+            for h in col.select("h4")
+            if _normalize_space(h.get_text(" ", strip=True))
+        ]
+
+        if heading.lower() == "registered agent":
+            values = [x for x in lines[1:] if x.lower() != "registered agent"]
+            out["registered_agent"] = ", ".join(values) if values else None
+        elif heading.lower() == "principal office address":
+            values = [x for x in lines[1:] if x.lower() != "principal office address"]
+            out["principal_address"] = ", ".join(values) if values else None
+
+    if not any([out["business_status"], out["entity_type"], out["control_number"], out["business_start_date"]]):
+        out["source_status"] = "detail_fields_missing"
+
+    return out
 
 
-def fetch_business_registration(company_name: str) -> dict:
-    company_name = (company_name or "").strip()
+def fetch_business_registration(
+    company_name: str,
+    *,
+    headless: bool = True,
+    manual_wait_ms: int = 120000,
+) -> dict:
+    company_name = _normalize_space(company_name)
     if not company_name:
-        return {
-            "business_status": None,
-            "business_start_date": None,
-            "registered_agent": None,
-            "entity_type": None,
-            "industry_attributes": {},
-            "source_url": SEARCH_URL,
-        }
+        return _empty_result("empty_query")
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(SEARCH_URL, timeout=45000)
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context(viewport={"width": 1440, "height": 1100})
+            page = context.new_page()
 
-            search_input = _first_visible(
-                page,
-                [
-                    'input[type="text"]',
-                    'input[name*="Search"]',
-                    'input[id*="Search"]',
-                    'input[name*="Name"]',
-                    'input[id*="Name"]',
-                ],
-            )
-            if search_input is None:
-                browser.close()
-                return {
-                    "business_status": None,
-                    "business_start_date": None,
-                    "registered_agent": None,
-                    "entity_type": None,
-                    "industry_attributes": {},
-                    "source_url": SEARCH_URL,
-                }
-
-            search_input.fill(company_name)
-
-            submit = _first_visible(
-                page,
-                [
-                    'input[type="submit"]',
-                    'button[type="submit"]',
-                    'input[value*="Search"]',
-                    'button:has-text("Search")',
-                    'a:has-text("Search")',
-                ],
-            )
-
-            if submit is not None:
-                submit.click()
-            else:
-                search_input.press("Enter")
-
+            page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(2500)
 
-            result_link = _first_visible(
-                page,
-                [
-                    'a[href*="BusinessInformation"]',
-                    'a[href*="BusinessInfo"]',
-                    'a[href*="BusinessDetail"]',
-                    'a[href*="FilingDetail"]',
-                    "table a",
-                    "gridview a",
-                ],
-            )
+            suffix = _find_suffix(page)
+            if not suffix:
+                browser.close()
+                return _empty_result("widget_suffix_not_found")
 
-            if result_link is not None:
+            name_selector = f"#Name_{suffix}"
+            page.locator(name_selector).fill(company_name)
+
+            if not headless:
+                print("")
+                print("TN SOS manual step required:")
+                print("1) Click the Cloudflare 'Verify you are human' box")
+                print("2) Click Search")
+                print("3) Click the correct Details button")
+                print("4) Leave the browser open until parsing finishes")
+                print("")
+
                 try:
-                    result_link.click()
-                    page.wait_for_timeout(2500)
-                except Exception:
-                    pass
+                    page.wait_for_selector("#KendoWindowLevel1 #business-details, #business-details", timeout=manual_wait_ms)
+                except PlaywrightTimeoutError:
+                    try:
+                        page.wait_for_selector("button.k-grid-Details, .k-grid-table tbody tr", timeout=2000)
+                        browser.close()
+                        return _empty_result("details_not_opened")
+                    except PlaywrightTimeoutError:
+                        browser.close()
+                        return _empty_result("results_not_found")
+            else:
+                browser.close()
+                return _empty_result("manual_verification_required")
 
             html = page.content()
+            current_url = page.url
             browser.close()
-            return _parse_detail_html(html)
+            return _parse_detail_html(html, current_url)
 
+    except PlaywrightTimeoutError:
+        return _empty_result("timeout")
     except Exception:
-        return {
-            "business_status": None,
-            "business_start_date": None,
-            "registered_agent": None,
-            "entity_type": None,
-            "industry_attributes": {},
-            "source_url": SEARCH_URL,
-        }
+        return _empty_result("exception")
