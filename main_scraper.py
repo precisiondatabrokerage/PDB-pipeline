@@ -9,7 +9,11 @@ from typing import Dict, List, Optional
 # =====================================================
 # ENABLED SCRAPER
 # =====================================================
-from scrapers.yellowpages_playwright import fetch_yellowpages_playwright
+from scrapers.yellowpages_scraper import (
+    DEFAULT_YELLOWPAGES_INDUSTRIES,
+    DEFAULT_YELLOWPAGES_LOCATIONS,
+    fetch_yellowpages_scraper,
+)
 
 # =====================================================
 # Enrichers
@@ -38,7 +42,7 @@ def _safe_source_id(name: Optional[str], phone: Optional[str], city: str) -> str
 
 
 def _scraper_versions():
-    import scrapers.yellowpages_playwright as yp
+    import scrapers.yellowpages_scraper as yp
     import enrichers.website_discovery as wd
     import enrichers.website_fetch as wf
 
@@ -84,28 +88,30 @@ def run_pipeline(trigger: str = "manual"):
             },
         )
 
-    markets = ["Knoxville, TN", "Maryville, TN"]
-
-    industries = [
-        "Property Management",
-        "HOA Management",
-        "Commercial Real Estate",
-        "Insurance Agencies",
-    ]
+    markets = list(DEFAULT_YELLOWPAGES_LOCATIONS)
+    industries = list(DEFAULT_YELLOWPAGES_INDUSTRIES)
 
     docs: List[Dict] = []
     errors: List[str] = []
+    seen_doc_keys = set()
 
     for city in markets:
         for industry in industries:
             try:
-                results = fetch_yellowpages_playwright(
+                results = fetch_yellowpages_scraper(
                     search_term=industry,
                     location=city,
+                    headless=True,
+                    max_pages=2,
+                    max_scrolls=3,
                 ) or []
             except Exception as e:
                 errors.append(f"yellowpages[{industry}][{city}]: {type(e).__name__}")
                 continue
+
+            print(f"[debug] scraper_results city={city} industry={industry} count={len(results)}")
+            if results:
+                print(f"[debug] first_result={results[0]}")
 
             for r in results:
                 wd = discover_website(r)
@@ -123,7 +129,7 @@ def run_pipeline(trigger: str = "manual"):
                     "website_status": website_payload.get("website_status"),
                 })
 
-                docs.append({
+                doc = {
                     "run_id": run_id,
                     "source": "yellowpages",
                     "source_id": _safe_source_id(
@@ -137,12 +143,28 @@ def run_pipeline(trigger: str = "manual"):
                     "market": city,
                     "query": industry,
                     "raw": raw,
-                    "extracted": raw,  # ETL derives everything
-                })
+                    "extracted": raw,
+                }
 
+                dedupe_key = (
+                    doc["source"],
+                    doc["source_id"],
+                    doc["market"],
+                    doc["query"],
+                )
+                if dedupe_key in seen_doc_keys:
+                    continue
+
+                seen_doc_keys.add(dedupe_key)
+                docs.append(doc)
+
+    print(f"[debug] docs_total_before_insert={len(docs)}")
     if docs:
         mongo.raw_businesses.insert_many(docs)
+        print(f"[debug] inserted_docs={len(docs)}")
         bump(len(docs))
+        latest_run = mongo.ingestion_runs.find_one({"run_id": run_id}) or {}
+        print(f"[debug] raw_counts_after_bump={latest_run.get('raw_counts')}")
 
     if errors:
         mongo.ingestion_runs.update_one(
@@ -150,6 +172,7 @@ def run_pipeline(trigger: str = "manual"):
             {"$push": {"errors": {"$each": errors}}},
         )
 
+    print(f"[debug] fetching_final_run_doc run_id={run_id}")
     run = mongo.ingestion_runs.find_one({"run_id": run_id}) or {}
     total = (run.get("raw_counts") or {}).get("total") or 0
     status = "completed" if total > 0 else "failed"

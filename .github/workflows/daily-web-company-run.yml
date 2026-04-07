@@ -1,0 +1,178 @@
+name: Daily Web Company Run
+
+on:
+  schedule:
+    - cron: "15 13 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-web-company-run
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      APP_ENV: production
+      SUPABASE_POSTGRES_URL: ${{ secrets.SUPABASE_POSTGRES_URL }}
+      MONGODB_URI: ${{ secrets.MONGODB_URI }}
+      MONGODB_DB: ${{ secrets.MONGODB_DB }}
+      WEB_EXPANSION_LIMIT: ${{ vars.WEB_EXPANSION_LIMIT }}
+      WEB_CONTACT_LIMIT: ${{ vars.WEB_CONTACT_LIMIT }}
+      PDB_ETL_REPOSITORY: ${{ vars.PDB_ETL_REPOSITORY }}
+
+    steps:
+      - name: Checkout PDB-pipeline
+        uses: actions/checkout@v4
+        with:
+          path: pdb-pipeline
+
+      - name: Checkout PDB-etl
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PDB_ETL_REPOSITORY }}
+          token: ${{ secrets.PDB_REPO_PAT }}
+          path: pdb-etl
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r pdb-pipeline/requirements.txt
+          pip install -r pdb-etl/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run daily web/company orchestrator
+        shell: bash
+        working-directory: pdb-pipeline
+        run: |
+          set -euo pipefail
+
+          EXPANSION_LIMIT="${WEB_EXPANSION_LIMIT:-100}"
+          CONTACT_LIMIT="${WEB_CONTACT_LIMIT:-250}"
+
+          python -u -m runners.run_web_company_end_to_end \
+            --trigger github_actions_schedule \
+            --expansion-limit "${EXPANSION_LIMIT}" \
+            --contact-limit "${CONTACT_LIMIT}" \
+            --metrics-json-out web_run_metrics.json | tee web_run.log
+
+      - name: Build run summary
+        if: always()
+        shell: bash
+        working-directory: pdb-pipeline
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          metrics_path = Path("web_run_metrics.json")
+
+          with open(summary_path, "a", encoding="utf-8") as out:
+              out.write("## Daily Web Company Run\n\n")
+
+              if not metrics_path.exists():
+                  out.write("No metrics file was produced.\n")
+                  raise SystemExit(0)
+
+              data = json.loads(metrics_path.read_text(encoding="utf-8"))
+
+              out.write(f"- Run ID: `{data.get('run_id')}`\n")
+              out.write(f"- Dataset ID: `{data.get('dataset_id')}`\n")
+              out.write(f"- Status: `{data.get('status')}`\n")
+              out.write(f"- Raw records ingested: `{data.get('raw_records_ingested')}`\n")
+              out.write(f"- Companies seeded: `{data.get('companies_seeded')}`\n")
+              out.write(f"- Companies enriched: `{data.get('companies_enriched')}`\n")
+              out.write(f"- Contacts found: `{data.get('contacts_found')}`\n")
+              out.write(f"- Leads inserted: `{data.get('leads_inserted')}`\n")
+              out.write(f"- Sellable leads inserted: `{data.get('sellable_leads_inserted')}`\n")
+              out.write(f"- Premium leads inserted: `{data.get('premium_leads_inserted')}`\n")
+              out.write(f"- Total elapsed seconds: `{data.get('elapsed_seconds_total')}`\n\n")
+
+              alerts = data.get("alerts") or []
+              if alerts:
+                  out.write("### Alerts\n\n")
+                  for alert in alerts:
+                      out.write(
+                          f"- **{alert.get('key')}**: {alert.get('message')} "
+                          f"(current={alert.get('current')}, threshold={alert.get('threshold')})\n"
+                      )
+                  out.write("\n")
+              else:
+                  out.write("### Alerts\n\nNo alerts triggered.\n\n")
+
+              benchmarks = data.get("source_benchmarks") or {}
+              out.write("### Source Benchmarks\n\n")
+              out.write("| Source | Companies/100 queries | Website rate | Named-contact rate | Sellable-email rate | Premium-contact rate | Failure rate |\n")
+              out.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+
+              for source, row in sorted(benchmarks.items()):
+                  def pct(v):
+                      if v is None:
+                          return "n/a"
+                      return f"{float(v) * 100:.2f}%"
+
+                  companies_per_100 = row.get("companies_found_per_100_queries")
+                  companies_per_100 = "n/a" if companies_per_100 is None else f"{float(companies_per_100):.2f}"
+
+                  out.write(
+                      f"| {source} | {companies_per_100} | "
+                      f"{pct(row.get('websites_discovered_rate'))} | "
+                      f"{pct(row.get('named_contact_rate'))} | "
+                      f"{pct(row.get('sellable_email_rate'))} | "
+                      f"{pct(row.get('premium_contact_rate'))} | "
+                      f"{pct(row.get('source_failure_rate'))} |\n"
+                  )
+          PY
+
+      - name: Enforce alert conditions
+        if: always()
+        shell: bash
+        working-directory: pdb-pipeline
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          metrics_path = Path("web_run_metrics.json")
+          if not metrics_path.exists():
+              raise SystemExit("web_run_metrics.json was not created")
+
+          data = json.loads(metrics_path.read_text(encoding="utf-8"))
+
+          if str(data.get("status")).lower() != "completed":
+              raise SystemExit(f"Run status is not completed: {data.get('status')}")
+
+          alerts = data.get("alerts") or []
+          if alerts:
+              lines = ["Alert conditions triggered:"]
+              for alert in alerts:
+                  lines.append(
+                      f"- {alert.get('key')}: {alert.get('message')} "
+                      f"(current={alert.get('current')}, threshold={alert.get('threshold')})"
+                  )
+              raise SystemExit("\n".join(lines))
+          PY
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-web-company-run-artifacts
+          path: |
+            pdb-pipeline/web_run.log
+            pdb-pipeline/web_run_metrics.json
