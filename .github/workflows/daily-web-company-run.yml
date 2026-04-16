@@ -9,32 +9,75 @@ concurrency:
   group: daily-web-company-run
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  APP_ENV: production
+  SUPABASE_POSTGRES_URL: ${{ secrets.SUPABASE_POSTGRES_URL }}
+  MONGODB_URI: ${{ secrets.MONGODB_URI }}
+  MONGODB_DB: ${{ secrets.MONGODB_DB }}
+  WEB_EXPANSION_LIMIT: ${{ vars.WEB_EXPANSION_LIMIT }}
+  WEB_CONTACT_LIMIT: ${{ vars.WEB_CONTACT_LIMIT }}
+  PDB_ETL_REPOSITORY: ${{ vars.PDB_ETL_REPOSITORY }}
+  PDB_REPO_PAT: ${{ secrets.PDB_REPO_PAT }}
+
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
-    env:
-      APP_ENV: production
-      SUPABASE_POSTGRES_URL: ${{ secrets.SUPABASE_POSTGRES_URL }}
-      MONGODB_URI: ${{ secrets.MONGODB_URI }}
-      MONGODB_DB: ${{ secrets.MONGODB_DB }}
-      WEB_EXPANSION_LIMIT: ${{ vars.WEB_EXPANSION_LIMIT }}
-      WEB_CONTACT_LIMIT: ${{ vars.WEB_CONTACT_LIMIT }}
-      PDB_ETL_REPOSITORY: ${{ vars.PDB_ETL_REPOSITORY }}
-
     steps:
+      - name: Validate workflow configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=0
+
+          if [ -z "${PDB_ETL_REPOSITORY:-}" ]; then
+            echo "::error::Missing repository variable PDB_ETL_REPOSITORY"
+            missing=1
+          fi
+
+          if [ -z "${PDB_REPO_PAT:-}" ]; then
+            echo "::error::Missing secret PDB_REPO_PAT. Required to checkout the private pdb-etl repository."
+            missing=1
+          fi
+
+          if [ -z "${SUPABASE_POSTGRES_URL:-}" ]; then
+            echo "::error::Missing secret SUPABASE_POSTGRES_URL"
+            missing=1
+          fi
+
+          if [ -z "${MONGODB_URI:-}" ]; then
+            echo "::error::Missing secret MONGODB_URI"
+            missing=1
+          fi
+
+          if [ -z "${MONGODB_DB:-}" ]; then
+            echo "::error::Missing secret MONGODB_DB"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
       - name: Checkout PDB-pipeline
         uses: actions/checkout@v4
         with:
           path: pdb-pipeline
+          fetch-depth: 1
 
       - name: Checkout PDB-etl
         uses: actions/checkout@v4
         with:
           repository: ${{ env.PDB_ETL_REPOSITORY }}
-          token: ${{ secrets.PDB_REPO_PAT }}
+          token: ${{ env.PDB_REPO_PAT }}
           path: pdb-etl
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -173,6 +216,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: daily-web-company-run-artifacts
+          if-no-files-found: ignore
           path: |
             pdb-pipeline/web_run.log
             pdb-pipeline/web_run_metrics.json
