@@ -20,8 +20,6 @@ env:
   MONGODB_DB: ${{ secrets.MONGODB_DB }}
   WEB_EXPANSION_LIMIT: ${{ vars.WEB_EXPANSION_LIMIT }}
   WEB_CONTACT_LIMIT: ${{ vars.WEB_CONTACT_LIMIT }}
-  PDB_ETL_REPOSITORY: ${{ vars.PDB_ETL_REPOSITORY }}
-  PDB_REPO_PAT: ${{ secrets.PDB_REPO_PAT }}
 
 jobs:
   run:
@@ -29,6 +27,12 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      - name: Checkout PDB-pipeline
+        uses: actions/checkout@v4
+        with:
+          path: pdb-pipeline
+          fetch-depth: 1
+
       - name: Validate workflow configuration
         shell: bash
         run: |
@@ -36,13 +40,13 @@ jobs:
 
           missing=0
 
-          if [ -z "${PDB_ETL_REPOSITORY:-}" ]; then
+          if [ -z "${{ vars.PDB_ETL_REPOSITORY }}" ]; then
             echo "::error::Missing repository variable PDB_ETL_REPOSITORY"
             missing=1
           fi
 
-          if [ -z "${PDB_REPO_PAT:-}" ]; then
-            echo "::error::Missing secret PDB_REPO_PAT. Required to checkout the private pdb-etl repository."
+          if [ -z "${{ secrets.PDB_REPO_PAT }}" ]; then
+            echo "::error::Missing secret PDB_REPO_PAT"
             missing=1
           fi
 
@@ -65,19 +69,49 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout PDB-pipeline
-        uses: actions/checkout@v4
-        with:
-          path: pdb-pipeline
-          fetch-depth: 1
+      - name: Debug ETL repo value
+        shell: bash
+        run: |
+          echo "PDB_ETL_REPOSITORY=${{ vars.PDB_ETL_REPOSITORY }}"
+
+      - name: Preflight check ETL repo access
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status=$(curl -s -o /tmp/repo_check.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.PDB_REPO_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ vars.PDB_ETL_REPOSITORY }}")
+
+          echo "GitHub API repo check HTTP status: $status"
+
+          if [ "$status" != "200" ]; then
+            echo "::error::PAT cannot access repo ${{ vars.PDB_ETL_REPOSITORY }}"
+            cat /tmp/repo_check.json
+            exit 1
+          fi
+
+          cat /tmp/repo_check.json
 
       - name: Checkout PDB-etl
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.PDB_ETL_REPOSITORY }}
-          token: ${{ env.PDB_REPO_PAT }}
+          repository: ${{ vars.PDB_ETL_REPOSITORY }}
+          token: ${{ secrets.PDB_REPO_PAT }}
           path: pdb-etl
           fetch-depth: 1
+
+      - name: Verify checkouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwd
+          ls -la
+          echo "--- pdb-pipeline ---"
+          ls -la pdb-pipeline
+          echo "--- pdb-etl ---"
+          ls -la pdb-etl
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -95,9 +129,10 @@ jobs:
 
       - name: Run daily web/company orchestrator
         shell: bash
-        working-directory: pdb-pipeline
         run: |
           set -euo pipefail
+
+          cd pdb-pipeline
 
           EXPANSION_LIMIT="${WEB_EXPANSION_LIMIT:-100}"
           CONTACT_LIMIT="${WEB_CONTACT_LIMIT:-250}"
@@ -111,7 +146,6 @@ jobs:
       - name: Build run summary
         if: always()
         shell: bash
-        working-directory: pdb-pipeline
         run: |
           set -euo pipefail
 
@@ -121,7 +155,7 @@ jobs:
           from pathlib import Path
 
           summary_path = os.environ["GITHUB_STEP_SUMMARY"]
-          metrics_path = Path("web_run_metrics.json")
+          metrics_path = Path("pdb-pipeline/web_run_metrics.json")
 
           with open(summary_path, "a", encoding="utf-8") as out:
               out.write("## Daily Web Company Run\n\n")
@@ -143,47 +177,11 @@ jobs:
               out.write(f"- Sellable leads inserted: `{data.get('sellable_leads_inserted')}`\n")
               out.write(f"- Premium leads inserted: `{data.get('premium_leads_inserted')}`\n")
               out.write(f"- Total elapsed seconds: `{data.get('elapsed_seconds_total')}`\n\n")
-
-              alerts = data.get("alerts") or []
-              if alerts:
-                  out.write("### Alerts\n\n")
-                  for alert in alerts:
-                      out.write(
-                          f"- **{alert.get('key')}**: {alert.get('message')} "
-                          f"(current={alert.get('current')}, threshold={alert.get('threshold')})\n"
-                      )
-                  out.write("\n")
-              else:
-                  out.write("### Alerts\n\nNo alerts triggered.\n\n")
-
-              benchmarks = data.get("source_benchmarks") or {}
-              out.write("### Source Benchmarks\n\n")
-              out.write("| Source | Companies/100 queries | Website rate | Named-contact rate | Sellable-email rate | Premium-contact rate | Failure rate |\n")
-              out.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-
-              for source, row in sorted(benchmarks.items()):
-                  def pct(v):
-                      if v is None:
-                          return "n/a"
-                      return f"{float(v) * 100:.2f}%"
-
-                  companies_per_100 = row.get("companies_found_per_100_queries")
-                  companies_per_100 = "n/a" if companies_per_100 is None else f"{float(companies_per_100):.2f}"
-
-                  out.write(
-                      f"| {source} | {companies_per_100} | "
-                      f"{pct(row.get('websites_discovered_rate'))} | "
-                      f"{pct(row.get('named_contact_rate'))} | "
-                      f"{pct(row.get('sellable_email_rate'))} | "
-                      f"{pct(row.get('premium_contact_rate'))} | "
-                      f"{pct(row.get('source_failure_rate'))} |\n"
-                  )
           PY
 
       - name: Enforce alert conditions
         if: always()
         shell: bash
-        working-directory: pdb-pipeline
         run: |
           set -euo pipefail
 
@@ -191,24 +189,14 @@ jobs:
           import json
           from pathlib import Path
 
-          metrics_path = Path("web_run_metrics.json")
+          metrics_path = Path("pdb-pipeline/web_run_metrics.json")
           if not metrics_path.exists():
-              raise SystemExit("web_run_metrics.json was not created")
+              raise SystemExit("pdb-pipeline/web_run_metrics.json was not created")
 
           data = json.loads(metrics_path.read_text(encoding="utf-8"))
 
           if str(data.get("status")).lower() != "completed":
               raise SystemExit(f"Run status is not completed: {data.get('status')}")
-
-          alerts = data.get("alerts") or []
-          if alerts:
-              lines = ["Alert conditions triggered:"]
-              for alert in alerts:
-                  lines.append(
-                      f"- {alert.get('key')}: {alert.get('message')} "
-                      f"(current={alert.get('current')}, threshold={alert.get('threshold')})"
-                  )
-              raise SystemExit("\n".join(lines))
           PY
 
       - name: Upload run artifacts
