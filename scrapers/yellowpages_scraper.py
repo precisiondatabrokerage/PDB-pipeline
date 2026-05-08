@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 from urllib.parse import quote_plus, urljoin
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
-
-from config.web_scraper_targets import (
-    DEFAULT_YELLOWPAGES_INDUSTRIES,
-    DEFAULT_YELLOWPAGES_LOCATIONS,
-)
 
 try:
     from playwright_stealth import Stealth  # type: ignore
@@ -26,7 +21,7 @@ except Exception:
     stealth_sync = None  # type: ignore
     _HAS_STEALTH_SYNC = False
 
-__version__ = "4.1.0"
+__version__ = "4.2.0"
 
 BASE_URL = "https://www.yellowpages.com"
 SEARCH_URL = "https://www.yellowpages.com/search"
@@ -134,8 +129,8 @@ def fetch_yellowpages_scraper(
     location: str,
     *,
     headless: bool = True,
-    max_pages: int = 2,
-    max_scrolls: int = 3,
+    max_pages: int = 1,
+    max_scrolls: int = 2,
 ) -> List[Dict]:
     results: List[Dict] = []
     seen = set()
@@ -164,16 +159,23 @@ def fetch_yellowpages_scraper(
                     page.wait_for_selector("a.business-name", timeout=25000)
                 except Exception:
                     html = page.content()
+
                     if "captcha" in html.lower():
                         if page_num == 1 and not results:
                             return []
-                        print(f"[yellowpages] captcha on page {page_num}; preserving prior rows and stopping pagination")
+                        print(
+                            f"[yellowpages] captcha on page {page_num}; "
+                            f"preserving prior rows and stopping pagination"
+                        )
                         break
 
                     if page_num == 1 and not results:
                         return []
 
-                    print(f"[yellowpages] no business-name selector on page {page_num}; preserving prior rows and stopping pagination")
+                    print(
+                        f"[yellowpages] no business-name selector on page {page_num}; "
+                        f"preserving prior rows and stopping pagination"
+                    )
                     break
 
                 for _ in range(max_scrolls):
@@ -186,7 +188,10 @@ def fetch_yellowpages_scraper(
                 if "captcha" in html.lower():
                     if page_num == 1 and not results:
                         return []
-                    print(f"[yellowpages] captcha after render on page {page_num}; preserving prior rows and stopping pagination")
+                    print(
+                        f"[yellowpages] captcha after render on page {page_num}; "
+                        f"preserving prior rows and stopping pagination"
+                    )
                     break
 
                 parsed = _parse_cards(html, industry_tag=search_term)
@@ -195,7 +200,10 @@ def fetch_yellowpages_scraper(
                 if not parsed:
                     if page_num == 1 and not results:
                         return []
-                    print(f"[yellowpages] no parsed rows on page {page_num}; preserving prior rows and stopping pagination")
+                    print(
+                        f"[yellowpages] no parsed rows on page {page_num}; "
+                        f"preserving prior rows and stopping pagination"
+                    )
                     break
 
                 for row in parsed:
@@ -220,6 +228,6 @@ def fetch_yellowpages_playwright(search_term: str, location: str) -> List[Dict]:
         search_term=search_term,
         location=location,
         headless=True,
-        max_pages=2,
-        max_scrolls=5,
+        max_pages=1,
+        max_scrolls=2,
     )
