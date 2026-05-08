@@ -7,6 +7,11 @@ from urllib.parse import quote_plus, urljoin
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+from config.web_scraper_targets import (
+    DEFAULT_YELLOWPAGES_INDUSTRIES,
+    DEFAULT_YELLOWPAGES_LOCATIONS,
+)
+
 try:
     from playwright_stealth import Stealth  # type: ignore
     _HAS_STEALTH_CLASS = True
@@ -21,7 +26,7 @@ except Exception:
     stealth_sync = None  # type: ignore
     _HAS_STEALTH_SYNC = False
 
-__version__ = "4.0.1"
+__version__ = "4.1.0"
 
 BASE_URL = "https://www.yellowpages.com"
 SEARCH_URL = "https://www.yellowpages.com/search"
@@ -31,22 +36,6 @@ UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
-
-DEFAULT_YELLOWPAGES_LOCATIONS = [
-    "Knoxville, TN",
-    "Maryville, TN",
-]
-
-DEFAULT_YELLOWPAGES_INDUSTRIES = [
-    "Property Management",
-    "HOA Management",
-    "Commercial Real Estate",
-    "Insurance Agencies",
-    "Electricians",
-    "Roofing",
-    "Plumbers",
-    "Contractors",
-]
 
 
 def _safe_text(el):
@@ -232,5 +221,5 @@ def fetch_yellowpages_playwright(search_term: str, location: str) -> List[Dict]:
         location=location,
         headless=True,
         max_pages=2,
-        max_scrolls=3,
+        max_scrolls=5,
     )

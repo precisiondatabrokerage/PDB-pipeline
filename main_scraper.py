@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -6,24 +8,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-# =====================================================
-# ENABLED SCRAPER
-# =====================================================
-from scrapers.yellowpages_scraper import (
-    DEFAULT_YELLOWPAGES_INDUSTRIES,
-    DEFAULT_YELLOWPAGES_LOCATIONS,
-    fetch_yellowpages_scraper,
+from config.web_scraper_targets import (
+    count_active_yellowpages_query_pairs,
+    get_active_yellowpages_targets,
 )
+from scrapers.yellowpages_scraper import fetch_yellowpages_scraper
 
-# =====================================================
-# Enrichers
-# =====================================================
 from enrichers.website_discovery import discover_website
 from enrichers.website_fetch import fetch_website_html
 
-# =====================================================
-# Mongo
-# =====================================================
 from db.mongo_client import get_mongo
 
 
@@ -66,6 +59,9 @@ def run_pipeline(trigger: str = "manual"):
         "sources": ["yellowpages"],
         "scraper_versions": _scraper_versions(),
         "raw_counts": {"total": 0, "by_source": {}},
+        "query_plan": {
+            "yellowpages_query_pairs": count_active_yellowpages_query_pairs(),
+        },
         "started_at": now,
         "completed_at": None,
         "etl_processed": False,
@@ -77,6 +73,7 @@ def run_pipeline(trigger: str = "manual"):
     def bump(n: int):
         if n <= 0:
             return
+
         mongo.ingestion_runs.update_one(
             {"run_id": run_id},
             {
@@ -88,32 +85,44 @@ def run_pipeline(trigger: str = "manual"):
             },
         )
 
-    markets = list(DEFAULT_YELLOWPAGES_LOCATIONS)
-    industries = list(DEFAULT_YELLOWPAGES_INDUSTRIES)
-
-    docs: List[Dict] = []
+    targets = get_active_yellowpages_targets()
     errors: List[str] = []
     seen_doc_keys = set()
 
-    for city in markets:
-        for industry in industries:
+    print(f"[debug] active_yellowpages_query_pairs={len(targets)}")
+
+    for idx, target in enumerate(targets, start=1):
+        city = target["market"]
+        industry = target["industry"]
+        headless = bool(target.get("headless", True))
+        max_pages = int(target.get("max_pages", 1))
+        max_scrolls = int(target.get("max_scrolls", 2))
+
+        print(
+            f"[debug] target {idx}/{len(targets)} "
+            f"city={city} industry={industry} max_pages={max_pages} max_scrolls={max_scrolls}"
+        )
+
+        try:
+            results = fetch_yellowpages_scraper(
+                search_term=industry,
+                location=city,
+                headless=headless,
+                max_pages=max_pages,
+                max_scrolls=max_scrolls,
+            ) or []
+        except Exception as e:
+            errors.append(f"yellowpages[{industry}][{city}]: {type(e).__name__}: {e}")
+            continue
+
+        print(f"[debug] scraper_results city={city} industry={industry} count={len(results)}")
+        if results:
+            print(f"[debug] first_result={results[0]}")
+
+        docs_to_insert: List[Dict] = []
+
+        for r in results:
             try:
-                results = fetch_yellowpages_scraper(
-                    search_term=industry,
-                    location=city,
-                    headless=True,
-                    max_pages=2,
-                    max_scrolls=3,
-                ) or []
-            except Exception as e:
-                errors.append(f"yellowpages[{industry}][{city}]: {type(e).__name__}")
-                continue
-
-            print(f"[debug] scraper_results city={city} industry={industry} count={len(results)}")
-            if results:
-                print(f"[debug] first_result={results[0]}")
-
-            for r in results:
                 wd = discover_website(r)
                 raw_website = wd.get("raw_website")
                 domain = wd.get("domain")
@@ -156,15 +165,21 @@ def run_pipeline(trigger: str = "manual"):
                     continue
 
                 seen_doc_keys.add(dedupe_key)
-                docs.append(doc)
+                docs_to_insert.append(doc)
 
-    print(f"[debug] docs_total_before_insert={len(docs)}")
-    if docs:
-        mongo.raw_businesses.insert_many(docs)
-        print(f"[debug] inserted_docs={len(docs)}")
-        bump(len(docs))
-        latest_run = mongo.ingestion_runs.find_one({"run_id": run_id}) or {}
-        print(f"[debug] raw_counts_after_bump={latest_run.get('raw_counts')}")
+            except Exception as e:
+                errors.append(
+                    f"enrichment[{industry}][{city}][{r.get('raw_company_name')}]: {type(e).__name__}: {e}"
+                )
+                continue
+
+        if docs_to_insert:
+            mongo.raw_businesses.insert_many(docs_to_insert)
+            inserted_count = len(docs_to_insert)
+            bump(inserted_count)
+            print(
+                f"[debug] inserted_docs city={city} industry={industry} count={inserted_count}"
+            )
 
     if errors:
         mongo.ingestion_runs.update_one(

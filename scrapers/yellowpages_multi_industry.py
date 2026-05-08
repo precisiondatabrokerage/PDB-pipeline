@@ -42,7 +42,7 @@ def run_yellowpages_multi_industry(
             location=location,
             headless=True,
             max_pages=2,
-            max_scrolls=3,
+            max_scrolls=5,
         )
 
         for row in rows:

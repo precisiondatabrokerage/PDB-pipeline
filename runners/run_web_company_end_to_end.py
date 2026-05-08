@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPOS_ROOT = PROJECT_ROOT.parent
 DEFAULT_ETL_ROOT = REPOS_ROOT / "pdb-etl"
+DEFAULT_RAW_ARCHIVE_DIR = PROJECT_ROOT / "artifacts" / "raw_archives"
 
 INGEST_RE = re.compile(
     r"INGESTION COMPLETE\s+[—-]\s+(\d+)\s+raw records\s+\(run_id=([^)]+)\)",
@@ -34,6 +35,7 @@ if APP_ENV == "production":
 else:
     load_dotenv(PROJECT_ROOT / ".env.local", override=True)
 
+from runners.raw_retention import perform_run_raw_retention  # noqa: E402
 from runners.web_run_metrics import (  # noqa: E402
     build_source_benchmarks,
     evaluate_alerts,
@@ -285,6 +287,30 @@ def _assemble_metrics_payload(
     return payload
 
 
+def _should_run_raw_retention(
+    *,
+    mode: str,
+    run_id: Optional[str],
+    dataset_id: Optional[str],
+    status: str,
+    run_error: Optional[Exception],
+    persist_error: Optional[Exception],
+) -> bool:
+    if mode == "keep":
+        return False
+    if not run_id:
+        return False
+    if not dataset_id:
+        return False
+    if status != "completed":
+        return False
+    if run_error is not None:
+        return False
+    if persist_error is not None:
+        return False
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="One-command end-to-end web/company orchestration across pdb-pipeline and pdb-etl."
@@ -342,6 +368,22 @@ def main() -> None:
         default=0.25,
         help="Alert threshold for abnormal source query failure rate.",
     )
+    parser.add_argument(
+        "--raw-retention-mode",
+        choices=["keep", "archive-only", "archive-then-purge"],
+        default="keep",
+        help="Run-scoped raw Mongo retention strategy after successful completion.",
+    )
+    parser.add_argument(
+        "--raw-archive-dir",
+        default=str(DEFAULT_RAW_ARCHIVE_DIR),
+        help="Directory for raw archive artifacts.",
+    )
+    parser.add_argument(
+        "--raw-retention-strict",
+        action="store_true",
+        help="Fail the orchestration if post-run raw retention fails.",
+    )
     args = parser.parse_args()
 
     etl_root = Path(args.etl_root).resolve()
@@ -360,11 +402,16 @@ def main() -> None:
     expansion_apply_result: Dict[str, Optional[str]] = {}
     contact_result: Dict[str, Optional[str]] = {}
     validation: Dict[str, object] = {}
+    raw_retention_result: Dict[str, object] = {
+        "mode": args.raw_retention_mode,
+        "status": "not_run",
+    }
 
     status = "completed"
     error_message: Optional[str] = None
     run_error: Optional[Exception] = None
     persist_error: Optional[Exception] = None
+    raw_retention_error: Optional[Exception] = None
 
     try:
         if not run_id:
@@ -505,13 +552,6 @@ def main() -> None:
         payload["alerts"] = alert_state.get("alerts", [])
         payload["alert_triggered"] = bool(alert_state.get("alert_triggered"))
 
-        if args.metrics_json_out:
-            metrics_path = Path(args.metrics_json_out).resolve()
-            metrics_path.parent.mkdir(parents=True, exist_ok=True)
-            metrics_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-
-        print("FINAL_METRICS_JSON: " + json.dumps(payload, sort_keys=True, default=str))
-
         try:
             if run_id:
                 upsert_web_run_metrics(payload)
@@ -519,8 +559,53 @@ def main() -> None:
             persist_error = e
             print(f"WEB METRICS PERSIST FAILED: {type(e).__name__}: {e}")
 
+        if _should_run_raw_retention(
+            mode=args.raw_retention_mode,
+            run_id=run_id,
+            dataset_id=payload.get("dataset_id"),
+            status=status,
+            run_error=run_error,
+            persist_error=persist_error,
+        ):
+            try:
+                raw_retention_result = perform_run_raw_retention(
+                    run_id=run_id,
+                    mode=args.raw_retention_mode,
+                    archive_root=args.raw_archive_dir,
+                )
+                _print_block("RAW RETENTION", raw_retention_result)
+            except Exception as e:
+                raw_retention_error = e
+                raw_retention_result = {
+                    "mode": args.raw_retention_mode,
+                    "status": "failed",
+                    "error": f"{type(e).__name__}: {e}",
+                }
+                print(f"RAW RETENTION FAILED: {type(e).__name__}: {e}")
+
+                if args.raw_retention_strict and run_error is None and persist_error is None:
+                    status = "failed"
+                    error_message = raw_retention_result["error"]
+                    payload["status"] = status
+                    payload["error_message"] = error_message
+
+        payload["raw_retention"] = raw_retention_result
+
+        if args.metrics_json_out:
+            metrics_path = Path(args.metrics_json_out).resolve()
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            metrics_path.write_text(
+                json.dumps(payload, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+        print("FINAL_METRICS_JSON: " + json.dumps(payload, sort_keys=True, default=str))
+
         if persist_error is not None and run_error is None:
             raise persist_error
+
+        if raw_retention_error is not None and args.raw_retention_strict and run_error is None:
+            raise raw_retention_error
 
         if run_error is not None:
             raise run_error

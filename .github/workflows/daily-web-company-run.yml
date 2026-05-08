@@ -129,10 +129,9 @@ jobs:
 
       - name: Run daily web/company orchestrator
         shell: bash
+        working-directory: pdb-pipeline
         run: |
           set -euo pipefail
-
-          cd pdb-pipeline
 
           EXPANSION_LIMIT="${WEB_EXPANSION_LIMIT:-100}"
           CONTACT_LIMIT="${WEB_CONTACT_LIMIT:-250}"
@@ -141,6 +140,8 @@ jobs:
             --trigger github_actions_schedule \
             --expansion-limit "${EXPANSION_LIMIT}" \
             --contact-limit "${CONTACT_LIMIT}" \
+            --raw-retention-mode archive-then-purge \
+            --raw-archive-dir artifacts/raw_archives \
             --metrics-json-out web_run_metrics.json | tee web_run.log
 
       - name: Build run summary
@@ -176,7 +177,23 @@ jobs:
               out.write(f"- Leads inserted: `{data.get('leads_inserted')}`\n")
               out.write(f"- Sellable leads inserted: `{data.get('sellable_leads_inserted')}`\n")
               out.write(f"- Premium leads inserted: `{data.get('premium_leads_inserted')}`\n")
-              out.write(f"- Total elapsed seconds: `{data.get('elapsed_seconds_total')}`\n\n")
+              out.write(f"- Total elapsed seconds: `{data.get('elapsed_seconds_total')}`\n")
+
+              raw_retention = data.get("raw_retention") or {}
+              if raw_retention:
+                  out.write(f"- Raw retention mode: `{raw_retention.get('mode')}`\n")
+                  out.write(f"- Raw retention status: `{raw_retention.get('status')}`\n")
+
+                  archive = raw_retention.get("archive") or {}
+                  purge = raw_retention.get("purge") or {}
+
+                  if archive:
+                      out.write(f"- Archived raw docs: `{archive.get('total_written')}`\n")
+
+                  if purge:
+                      out.write(f"- Purged raw docs: `{purge.get('deleted_total')}`\n")
+
+              out.write("\n")
           PY
 
       - name: Enforce alert conditions
@@ -208,3 +225,4 @@ jobs:
           path: |
             pdb-pipeline/web_run.log
             pdb-pipeline/web_run_metrics.json
+            pdb-pipeline/artifacts/raw_archives
