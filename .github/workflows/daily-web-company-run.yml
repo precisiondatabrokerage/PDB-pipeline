@@ -127,6 +127,37 @@ jobs:
           pip install -r pdb-etl/requirements.txt
           python -m playwright install --with-deps chromium
 
+      - name: Emergency Mongo raw quota cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          from pymongo import MongoClient
+
+          uri = os.environ["MONGODB_URI"]
+          db_name = os.environ["MONGODB_DB"]
+
+          client = MongoClient(uri)
+          db = client[db_name]
+
+          collections = [
+              "raw_businesses",
+              "raw_company_expansions",
+              "raw_company_entity_expansion",
+          ]
+
+          for name in collections:
+              if name in db.list_collection_names():
+                  result = db[name].delete_many({})
+                  print(f"{name}: deleted {result.deleted_count}")
+              else:
+                  print(f"{name}: not found")
+
+          client.close()
+          PY
+
       - name: Run daily web/company orchestrator
         shell: bash
         working-directory: pdb-pipeline
