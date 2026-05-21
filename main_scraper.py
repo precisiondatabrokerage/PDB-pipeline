@@ -6,7 +6,7 @@ load_dotenv()
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from config.web_scraper_targets import (
     count_active_yellowpages_query_pairs,
@@ -43,6 +43,36 @@ def _scraper_versions():
         "yellowpages": getattr(yp, "__version__", "unknown"),
         "website_discovery": getattr(wd, "__version__", "unknown"),
         "website_fetch": getattr(wf, "__version__", "unknown"),
+    }
+
+
+def _summarize_website_payload(website_payload: Any) -> Dict[str, Any]:
+    """
+    Safe, lightweight website fetch summary for Mongo raw docs.
+
+    Important:
+    - DO NOT store full website HTML in raw_businesses.
+    - Only keep status + tiny metadata so a single huge page cannot exceed BSON limits.
+    """
+    if not isinstance(website_payload, dict):
+        return {
+            "website_status": None,
+            "website_html_bytes": 0,
+            "website_html_present": False,
+        }
+
+    html = website_payload.get("website_html")
+    html_present = isinstance(html, str) and bool(html)
+
+    if isinstance(html, str):
+        html_bytes = len(html.encode("utf-8", errors="ignore"))
+    else:
+        html_bytes = 0
+
+    return {
+        "website_status": website_payload.get("website_status"),
+        "website_html_bytes": html_bytes,
+        "website_html_present": html_present,
     }
 
 
@@ -128,14 +158,16 @@ def run_pipeline(trigger: str = "manual"):
                 domain = wd.get("domain")
 
                 website_payload = fetch_website_html(raw_website)
+                website_summary = _summarize_website_payload(website_payload)
 
                 raw = dict(r)
                 raw.update({
                     "raw_website": raw_website,
                     "domain": domain,
                     "website_discovery": wd.get("website_discovery"),
-                    "website_html": website_payload.get("website_html"),
-                    "website_status": website_payload.get("website_status"),
+                    "website_status": website_summary.get("website_status"),
+                    "website_html_bytes": website_summary.get("website_html_bytes"),
+                    "website_html_present": website_summary.get("website_html_present"),
                 })
 
                 doc = {
