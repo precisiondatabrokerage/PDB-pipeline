@@ -1,0 +1,24 @@
+name: Daily Web Company Run - NC Small Batch
+
+on:
+  schedule:
+    - cron: "15 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    uses: ./.github/workflows/_web-company-run-reusable.yml
+    with:
+      run_name: "Daily Web Company Run - NC Small Batch"
+      trigger_name: "github_actions_nc_small_batch"
+      active_state: "NC"
+      active_pack: "home_services"
+      active_market_slugs: "charlotte-nc,raleigh-nc,greensboro-nc,durham-nc,asheville-nc"
+      active_max_query_pairs: "45"
+      expansion_limit: "30"
+      contact_limit: "75"
+      artifact_name: "nc-small-batch-web-company-run-artifacts"
+    secrets: inherit

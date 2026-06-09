@@ -165,17 +165,19 @@ def _run_streaming_command(
 
     return out
 
+def _fetch_validation_counts(*, run_id: Optional[str], dataset_id: Optional[str]) -> Dict[str, object]:
+    if not dataset_id:
+        raise RuntimeError("Cannot fetch validation counts without dataset_id.")
 
-def _fetch_validation_counts(run_id: str) -> Dict[str, object]:
     conn = get_pg_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 with run_dataset as (
-                  select d.id, d.run_id, d.name, d.run_at, d.is_baseline, d.record_count
+                  select d.id, d.name, d.run_at, d.is_baseline, d.record_count
                   from public.datasets d
-                  where d.run_id = %s
+                  where d.id = %s::uuid
                 ),
                 run_companies as (
                   select c.*
@@ -191,6 +193,7 @@ def _fetch_validation_counts(run_id: str) -> Dict[str, object]:
                 )
                 select
                   (select id from run_dataset limit 1) as dataset_id,
+                  %s as run_id,
                   (select record_count from run_dataset limit 1) as dataset_record_count,
                   (select count(*) from run_companies) as companies_in_run,
                   (select count(*) from run_companies where website is not null) as companies_with_website,
@@ -200,7 +203,14 @@ def _fetch_validation_counts(run_id: str) -> Dict[str, object]:
                   (select count(*) from run_companies where contact_form_url is not null) as companies_with_contact_form,
                   (select count(*) from run_leads) as leads_from_run_companies,
                   (select count(*) from run_leads where source = 'company_expansion') as company_expansion_leads,
-                  (select count(*) from run_leads where lead_stage != 'prospect' and email is not null and syntax_valid is true and mx_valid is true) as sellable_leads_now,
+                  (
+                    select count(*)
+                    from run_leads
+                    where lead_stage != 'prospect'
+                      and email is not null
+                      and syntax_valid is true
+                      and mx_valid is true
+                  ) as sellable_leads_now,
                   (
                     select count(*)
                     from run_leads l
@@ -219,14 +229,13 @@ def _fetch_validation_counts(run_id: str) -> Dict[str, object]:
                       )
                   ) as premium_like_leads_now
                 """,
-                (run_id,),
+                (str(dataset_id), run_id),
             )
             row = cur.fetchone()
             cols = [d[0] for d in cur.description]
             return dict(zip(cols, row))
     finally:
         conn.close()
-
 
 def _assemble_metrics_payload(
     *,
@@ -493,7 +502,7 @@ def main() -> None:
                 cwd=etl_root,
             )
 
-        validation = _fetch_validation_counts(run_id)
+        validation = _fetch_validation_counts(run_id=run_id, dataset_id=dataset_id)
         total_elapsed = round(time.time() - orchestration_started, 2)
 
         _print_block(

@@ -1,0 +1,55 @@
+market_slug,state,city,market,population,population_rank,enabled,default_pack,source_profile,region,tier,notes
+nashville-tn,TN,Nashville,"Nashville, TN",683622,1,true,home_services,metro_heavy,middle_tn,metro,capital-market
+memphis-tn,TN,Memphis,"Memphis, TN",618639,2,true,home_services,metro_heavy,west_tn,metro,major-metro
+knoxville-tn,TN,Knoxville,"Knoxville, TN",198162,3,true,home_services,metro_heavy,east_tn,metro,current-core
+chattanooga-tn,TN,Chattanooga,"Chattanooga, TN",187030,4,true,home_services,standard_city,southeast_tn,metro,current-core
+clarksville-tn,TN,Clarksville,"Clarksville, TN",180716,5,true,home_services,standard_city,middle_tn,metro,added-missing-tn-market
+murfreesboro-tn,TN,Murfreesboro,"Murfreesboro, TN",165430,6,true,home_services,standard_city,middle_tn,metro,current-middle-tn
+franklin-tn,TN,Franklin,"Franklin, TN",88558,7,true,home_services,standard_city,middle_tn,mid,new-market
+johnson-city-tn,TN,Johnson City,"Johnson City, TN",73170,8,true,home_services,light_city,east_tn,mid,re-enabled-east-tn-market
+jackson-tn,TN,Jackson,"Jackson, TN",68974,9,true,home_services,standard_city,west_tn,mid,new-market
+hendersonville-tn,TN,Hendersonville,"Hendersonville, TN",63618,10,true,home_services,standard_city,middle_tn,mid,new-market
+smyrna-tn,TN,Smyrna,"Smyrna, TN",57418,11,true,home_services,standard_city,middle_tn,mid,new-market
+cleveland-tn,TN,Cleveland,"Cleveland, TN",50396,12,true,home_services,standard_city,southeast_tn,mid,added-missing-preset-market
+bartlett-tn,TN,Bartlett,"Bartlett, TN",56000,13,true,home_services,standard_city,west_tn,mid,added-missing-preset-market
+cookeville-tn,TN,Cookeville,"Cookeville, TN",38000,14,true,home_services,standard_city,upper_cumberland,mid,added-missing-preset-market
+maryville-tn,TN,Maryville,"Maryville, TN",31807,15,true,home_services_light,standard_city,east_tn,small,current-core
+oak-ridge-tn,TN,Oak Ridge,"Oak Ridge, TN",31000,16,true,home_services_light,standard_city,east_tn,small,added-missing-preset-market
+morristown-tn,TN,Morristown,"Morristown, TN",31000,17,true,home_services_light,standard_city,east_tn,small,added-missing-preset-market
+sevierville-tn,TN,Sevierville,"Sevierville, TN",20000,18,true,home_services_light,standard_city,east_tn,small,added-missing-preset-market
+pigeon-forge-tn,TN,Pigeon Forge,"Pigeon Forge, TN",6518,19,false,tourism_services,light_city,east_tn,tourism,current-tourism
+charlotte-nc,NC,Charlotte,"Charlotte, NC",911311,1,true,home_services,metro_heavy,charlotte_metro,metro,starter-nc
+raleigh-nc,NC,Raleigh,"Raleigh, NC",482295,2,true,home_services,metro_heavy,triangle,metro,starter-nc
+greensboro-nc,NC,Greensboro,"Greensboro, NC",302296,3,true,home_services,standard_city,triad,metro,starter-nc
+durham-nc,NC,Durham,"Durham, NC",296186,4,true,home_services,standard_city,triangle,metro,starter-nc
+winston-salem-nc,NC,Winston-Salem,"Winston-Salem, NC",255126,5,true,home_services,standard_city,triad,metro,starter-nc
+fayetteville-nc,NC,Fayetteville,"Fayetteville, NC",209000,6,true,home_services,standard_city,eastern_nc,metro,added-nc-expansion
+cary-nc,NC,Cary,"Cary, NC",180000,7,true,home_services,standard_city,triangle,mid,added-nc-expansion
+wilmington-nc,NC,Wilmington,"Wilmington, NC",120000,8,true,home_services,standard_city,coastal_nc,mid,added-nc-expansion
+high-point-nc,NC,High Point,"High Point, NC",115000,9,true,home_services,standard_city,triad,mid,added-nc-expansion
+asheville-nc,NC,Asheville,"Asheville, NC",95436,10,true,home_services,standard_city,western_nc,mid,starter-nc
+atlanta-ga,GA,Atlanta,"Atlanta, GA",500000,1,true,home_services,metro_heavy,atlanta_metro,metro,starter-ga
+augusta-ga,GA,Augusta,"Augusta, GA",200000,2,true,home_services,standard_city,east_ga,metro,starter-ga
+columbus-ga,GA,Columbus,"Columbus, GA",200000,3,true,home_services,standard_city,west_ga,metro,starter-ga
+macon-ga,GA,Macon,"Macon, GA",157000,4,true,home_services,standard_city,central_ga,metro,starter-ga
+savannah-ga,GA,Savannah,"Savannah, GA",148000,5,true,home_services,standard_city,coastal_ga,metro,starter-ga
+athens-ga,GA,Athens,"Athens, GA",128000,6,true,home_services,standard_city,north_ga,mid,starter-ga
+sandy-springs-ga,GA,Sandy Springs,"Sandy Springs, GA",108000,7,true,home_services,standard_city,atlanta_metro,mid,starter-ga
+roswell-ga,GA,Roswell,"Roswell, GA",92000,8,true,home_services,standard_city,atlanta_metro,mid,starter-ga
+alpharetta-ga,GA,Alpharetta,"Alpharetta, GA",66000,9,true,home_services,standard_city,atlanta_metro,mid,starter-ga
+marietta-ga,GA,Marietta,"Marietta, GA",61000,10,true,home_services,standard_city,atlanta_metro,mid,starter-ga
+louisville-ky,KY,Louisville,"Louisville, KY",622000,1,true,home_services,metro_heavy,north_central_ky,metro,starter-ky
+lexington-ky,KY,Lexington,"Lexington, KY",321000,2,true,home_services,metro_heavy,bluegrass,metro,starter-ky
+bowling-green-ky,KY,Bowling Green,"Bowling Green, KY",75000,3,true,home_services,standard_city,south_central_ky,mid,starter-ky
+owensboro-ky,KY,Owensboro,"Owensboro, KY",60000,4,true,home_services,standard_city,western_ky,mid,starter-ky
+covington-ky,KY,Covington,"Covington, KY",41000,5,true,home_services,standard_city,northern_ky,mid,starter-ky
+richmond-ky,KY,Richmond,"Richmond, KY",37000,6,true,home_services,standard_city,bluegrass,small,starter-ky
+georgetown-ky,KY,Georgetown,"Georgetown, KY",38000,7,true,home_services,standard_city,bluegrass,small,starter-ky
+florence-ky,KY,Florence,"Florence, KY",32000,8,true,home_services,standard_city,northern_ky,small,starter-ky
+hopkinsville-ky,KY,Hopkinsville,"Hopkinsville, KY",31000,9,true,home_services,standard_city,western_ky,small,starter-ky
+elizabethtown-ky,KY,Elizabethtown,"Elizabethtown, KY",32000,10,true,home_services,standard_city,north_central_ky,small,starter-ky
+portland-or,OR,Portland,"Portland, OR",,,true,car_dealerships,metro_heavy,northwestern_or,metro,oregon-car-dealers
+salem-or,OR,Salem,"Salem, OR",,,true,car_dealerships,standard_city,northwestern_or,metro,oregon-car-dealers
+gresham-or,OR,Gresham,"Gresham, OR",,,true,car_dealerships,standard_city,northwestern_or,mid,oregon-car-dealers
+hillsboro-or,OR,Hillsboro,"Hillsboro, OR",,,true,car_dealerships,standard_city,northwestern_or,mid,oregon-car-dealers
+beaverton-or,OR,Beaverton,"Beaverton, OR",,,true,car_dealerships,standard_city,northwestern_or,mid,oregon-car-dealers

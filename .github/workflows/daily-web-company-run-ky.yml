@@ -1,0 +1,24 @@
+name: Daily Web Company Run - KY Small Batch
+
+on:
+  schedule:
+    - cron: "15 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    uses: ./.github/workflows/_web-company-run-reusable.yml
+    with:
+      run_name: "Daily Web Company Run - KY Small Batch"
+      trigger_name: "github_actions_ky_small_batch"
+      active_state: "KY"
+      active_pack: "home_services"
+      active_market_slugs: "louisville-ky,lexington-ky,bowling-green-ky,owensboro-ky,covington-ky"
+      active_max_query_pairs: "45"
+      expansion_limit: "30"
+      contact_limit: "75"
+      artifact_name: "ky-small-batch-web-company-run-artifacts"
+    secrets: inherit

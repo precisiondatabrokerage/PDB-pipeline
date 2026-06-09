@@ -1,14 +1,40 @@
-name: Daily Web Company Run
+name: Reusable Web Company Run
 
 on:
-  # DISABLED - TO ENABLE UNCOMMENT TWO LINES BELOW THIS
-  # schedule:
-  #   - cron: "15 13 * * *"
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      run_name:
+        required: true
+        type: string
+      trigger_name:
+        required: true
+        type: string
+      active_state:
+        required: false
+        type: string
+        default: ""
+      active_pack:
+        required: true
+        type: string
+      active_market_slugs:
+        required: true
+        type: string
+      active_max_query_pairs:
+        required: true
+        type: string
+      expansion_limit:
+        required: true
+        type: string
+      contact_limit:
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
 
 concurrency:
-  group: daily-web-company-run
-  cancel-in-progress: true
+  group: web-company-run-small-batches
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -16,16 +42,22 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   APP_ENV: production
+
+  ACTIVE_MODE: registry
+  ACTIVE_STATE: ${{ inputs.active_state }}
+  ACTIVE_PACK: ${{ inputs.active_pack }}
+  ACTIVE_MARKET_SLUGS: ${{ inputs.active_market_slugs }}
+  ACTIVE_MAX_QUERY_PAIRS: ${{ inputs.active_max_query_pairs }}
+
   SUPABASE_POSTGRES_URL: ${{ secrets.SUPABASE_POSTGRES_URL }}
   MONGODB_URI: ${{ secrets.MONGODB_URI }}
   MONGODB_DB: ${{ secrets.MONGODB_DB }}
-  WEB_EXPANSION_LIMIT: ${{ vars.WEB_EXPANSION_LIMIT }}
-  WEB_CONTACT_LIMIT: ${{ vars.WEB_CONTACT_LIMIT }}
 
 jobs:
   run:
+    name: ${{ inputs.run_name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 75
 
     steps:
       - name: Checkout PDB-pipeline
@@ -70,10 +102,19 @@ jobs:
             exit 1
           fi
 
-      - name: Debug ETL repo value
+      - name: Debug run configuration
         shell: bash
         run: |
+          echo "Run name=${{ inputs.run_name }}"
+          echo "Trigger=${{ inputs.trigger_name }}"
           echo "PDB_ETL_REPOSITORY=${{ vars.PDB_ETL_REPOSITORY }}"
+          echo "ACTIVE_MODE=${ACTIVE_MODE}"
+          echo "ACTIVE_STATE=${ACTIVE_STATE}"
+          echo "ACTIVE_PACK=${ACTIVE_PACK}"
+          echo "ACTIVE_MARKET_SLUGS=${ACTIVE_MARKET_SLUGS}"
+          echo "ACTIVE_MAX_QUERY_PAIRS=${ACTIVE_MAX_QUERY_PAIRS}"
+          echo "EXPANSION_LIMIT=${{ inputs.expansion_limit }}"
+          echo "CONTACT_LIMIT=${{ inputs.contact_limit }}"
 
       - name: Preflight check ETL repo access
         shell: bash
@@ -92,8 +133,6 @@ jobs:
             cat /tmp/repo_check.json
             exit 1
           fi
-
-          cat /tmp/repo_check.json
 
       - name: Checkout PDB-etl
         uses: actions/checkout@v4
@@ -159,19 +198,16 @@ jobs:
           client.close()
           PY
 
-      - name: Run daily web/company orchestrator
+      - name: Run web/company orchestrator
         shell: bash
         working-directory: pdb-pipeline
         run: |
           set -euo pipefail
 
-          EXPANSION_LIMIT="${WEB_EXPANSION_LIMIT:-100}"
-          CONTACT_LIMIT="${WEB_CONTACT_LIMIT:-250}"
-
           python -u -m runners.run_web_company_end_to_end \
-            --trigger github_actions_schedule \
-            --expansion-limit "${EXPANSION_LIMIT}" \
-            --contact-limit "${CONTACT_LIMIT}" \
+            --trigger "${{ inputs.trigger_name }}" \
+            --expansion-limit "${{ inputs.expansion_limit }}" \
+            --contact-limit "${{ inputs.contact_limit }}" \
             --raw-retention-mode archive-then-purge \
             --raw-archive-dir artifacts/raw_archives \
             --metrics-json-out web_run_metrics.json | tee web_run.log
@@ -191,10 +227,15 @@ jobs:
           metrics_path = Path("pdb-pipeline/web_run_metrics.json")
 
           with open(summary_path, "a", encoding="utf-8") as out:
-              out.write("## Daily Web Company Run\n\n")
+              out.write("## ${{ inputs.run_name }}\n\n")
+              out.write(f"- Active mode: `{os.environ.get('ACTIVE_MODE')}`\n")
+              out.write(f"- Active state: `{os.environ.get('ACTIVE_STATE')}`\n")
+              out.write(f"- Active pack: `{os.environ.get('ACTIVE_PACK')}`\n")
+              out.write(f"- Active markets: `{os.environ.get('ACTIVE_MARKET_SLUGS')}`\n")
+              out.write(f"- Max query pairs: `{os.environ.get('ACTIVE_MAX_QUERY_PAIRS')}`\n")
 
               if not metrics_path.exists():
-                  out.write("No metrics file was produced.\n")
+                  out.write("\nNo metrics file was produced.\n")
                   raise SystemExit(0)
 
               data = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -252,7 +293,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-web-company-run-artifacts
+          name: ${{ inputs.artifact_name }}
           if-no-files-found: ignore
           path: |
             pdb-pipeline/web_run.log

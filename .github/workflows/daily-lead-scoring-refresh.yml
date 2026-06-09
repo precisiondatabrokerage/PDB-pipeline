@@ -1,13 +1,21 @@
-name: Daily Web Company Run
+name: Daily Lead Scoring Refresh
 
 on:
-  # DISABLED - TO ENABLE UNCOMMENT TWO LINES BELOW THIS
-  # schedule:
-  #   - cron: "15 13 * * *"
+  schedule:
+    - cron: "45 14 * * *"
   workflow_dispatch:
+    inputs:
+      refresh_limit:
+        description: "Maximum number of existing leads/companies to refresh"
+        required: false
+        default: "500"
+      stale_days:
+        description: "Only refresh records not scored/refreshed in this many days"
+        required: false
+        default: "14"
 
 concurrency:
-  group: daily-web-company-run
+  group: daily-lead-scoring-refresh
   cancel-in-progress: true
 
 permissions:
@@ -19,21 +27,15 @@ env:
   SUPABASE_POSTGRES_URL: ${{ secrets.SUPABASE_POSTGRES_URL }}
   MONGODB_URI: ${{ secrets.MONGODB_URI }}
   MONGODB_DB: ${{ secrets.MONGODB_DB }}
-  WEB_EXPANSION_LIMIT: ${{ vars.WEB_EXPANSION_LIMIT }}
-  WEB_CONTACT_LIMIT: ${{ vars.WEB_CONTACT_LIMIT }}
+  REFRESH_LIMIT: ${{ github.event.inputs.refresh_limit || vars.LEAD_SCORING_REFRESH_LIMIT || '500' }}
+  STALE_DAYS: ${{ github.event.inputs.stale_days || vars.LEAD_SCORING_STALE_DAYS || '14' }}
 
 jobs:
-  run:
+  refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 75
 
     steps:
-      - name: Checkout PDB-pipeline
-        uses: actions/checkout@v4
-        with:
-          path: pdb-pipeline
-          fetch-depth: 1
-
       - name: Validate workflow configuration
         shell: bash
         run: |
@@ -70,10 +72,12 @@ jobs:
             exit 1
           fi
 
-      - name: Debug ETL repo value
+      - name: Debug refresh configuration
         shell: bash
         run: |
           echo "PDB_ETL_REPOSITORY=${{ vars.PDB_ETL_REPOSITORY }}"
+          echo "REFRESH_LIMIT=${REFRESH_LIMIT}"
+          echo "STALE_DAYS=${STALE_DAYS}"
 
       - name: Preflight check ETL repo access
         shell: bash
@@ -93,8 +97,6 @@ jobs:
             exit 1
           fi
 
-          cat /tmp/repo_check.json
-
       - name: Checkout PDB-etl
         uses: actions/checkout@v4
         with:
@@ -103,14 +105,12 @@ jobs:
           path: pdb-etl
           fetch-depth: 1
 
-      - name: Verify checkouts
+      - name: Verify checkout
         shell: bash
         run: |
           set -euo pipefail
           pwd
           ls -la
-          echo "--- pdb-pipeline ---"
-          ls -la pdb-pipeline
           echo "--- pdb-etl ---"
           ls -la pdb-etl
 
@@ -119,64 +119,44 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install ETL dependencies
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r pdb-pipeline/requirements.txt
           pip install -r pdb-etl/requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Emergency Mongo raw quota cleanup
+      - name: Run daily lead scoring refresh
         shell: bash
+        working-directory: pdb-etl
         run: |
           set -euo pipefail
+
+          mkdir -p artifacts
 
           python - <<'PY'
-          import os
-          from pymongo import MongoClient
+          import importlib.util
+          import sys
 
-          uri = os.environ["MONGODB_URI"]
-          db_name = os.environ["MONGODB_DB"]
+          module_name = "runners.run_daily_lead_scoring_refresh"
+          spec = importlib.util.find_spec(module_name)
 
-          client = MongoClient(uri)
-          db = client[db_name]
+          if spec is None:
+              print("::error::Missing ETL runner: runners.run_daily_lead_scoring_refresh")
+              print("Create pdb-etl/runners/run_daily_lead_scoring_refresh.py before enabling this workflow.")
+              sys.exit(1)
 
-          collections = [
-              "raw_businesses",
-              "raw_company_expansions",
-              "raw_company_entity_expansion",
-          ]
-
-          for name in collections:
-              if name in db.list_collection_names():
-                  result = db[name].delete_many({})
-                  print(f"{name}: deleted {result.deleted_count}")
-              else:
-                  print(f"{name}: not found")
-
-          client.close()
+          print(f"Found ETL runner: {module_name}")
           PY
 
-      - name: Run daily web/company orchestrator
-        shell: bash
-        working-directory: pdb-pipeline
-        run: |
-          set -euo pipefail
+          python -u -m runners.run_daily_lead_scoring_refresh \
+            --trigger github_actions_daily_lead_scoring_refresh \
+            --refresh-limit "${REFRESH_LIMIT}" \
+            --stale-days "${STALE_DAYS}" \
+            --metrics-json-out artifacts/lead_scoring_refresh_metrics.json | tee artifacts/lead_scoring_refresh.log
 
-          EXPANSION_LIMIT="${WEB_EXPANSION_LIMIT:-100}"
-          CONTACT_LIMIT="${WEB_CONTACT_LIMIT:-250}"
-
-          python -u -m runners.run_web_company_end_to_end \
-            --trigger github_actions_schedule \
-            --expansion-limit "${EXPANSION_LIMIT}" \
-            --contact-limit "${CONTACT_LIMIT}" \
-            --raw-retention-mode archive-then-purge \
-            --raw-archive-dir artifacts/raw_archives \
-            --metrics-json-out web_run_metrics.json | tee web_run.log
-
-      - name: Build run summary
+      - name: Build refresh summary
         if: always()
         shell: bash
         run: |
@@ -188,10 +168,10 @@ jobs:
           from pathlib import Path
 
           summary_path = os.environ["GITHUB_STEP_SUMMARY"]
-          metrics_path = Path("pdb-pipeline/web_run_metrics.json")
+          metrics_path = Path("pdb-etl/artifacts/lead_scoring_refresh_metrics.json")
 
           with open(summary_path, "a", encoding="utf-8") as out:
-              out.write("## Daily Web Company Run\n\n")
+              out.write("## Daily Lead Scoring Refresh\n\n")
 
               if not metrics_path.exists():
                   out.write("No metrics file was produced.\n")
@@ -200,35 +180,27 @@ jobs:
               data = json.loads(metrics_path.read_text(encoding="utf-8"))
 
               out.write(f"- Run ID: `{data.get('run_id')}`\n")
-              out.write(f"- Dataset ID: `{data.get('dataset_id')}`\n")
               out.write(f"- Status: `{data.get('status')}`\n")
-              out.write(f"- Raw records ingested: `{data.get('raw_records_ingested')}`\n")
-              out.write(f"- Companies seeded: `{data.get('companies_seeded')}`\n")
-              out.write(f"- Companies enriched: `{data.get('companies_enriched')}`\n")
-              out.write(f"- Contacts found: `{data.get('contacts_found')}`\n")
-              out.write(f"- Leads inserted: `{data.get('leads_inserted')}`\n")
-              out.write(f"- Sellable leads inserted: `{data.get('sellable_leads_inserted')}`\n")
-              out.write(f"- Premium leads inserted: `{data.get('premium_leads_inserted')}`\n")
+              out.write(f"- Trigger: `{data.get('trigger')}`\n")
+              out.write(f"- Refresh limit: `{data.get('refresh_limit')}`\n")
+              out.write(f"- Stale days: `{data.get('stale_days')}`\n")
+              out.write(f"- Records considered: `{data.get('records_considered')}`\n")
+              out.write(f"- Records refreshed: `{data.get('records_refreshed')}`\n")
+              out.write(f"- Companies refreshed: `{data.get('companies_refreshed')}`\n")
+              out.write(f"- Leads refreshed: `{data.get('leads_refreshed')}`\n")
+              out.write(f"- Score increases: `{data.get('score_increases')}`\n")
+              out.write(f"- Score decreases: `{data.get('score_decreases')}`\n")
+              out.write(f"- Newly sellable: `{data.get('newly_sellable')}`\n")
+              out.write(f"- Newly premium: `{data.get('newly_premium')}`\n")
+              out.write(f"- Contact forms found: `{data.get('contact_forms_found')}`\n")
+              out.write(f"- Emails found: `{data.get('emails_found')}`\n")
+              out.write(f"- Phones confirmed: `{data.get('phones_confirmed')}`\n")
+              out.write(f"- Errors: `{data.get('errors')}`\n")
               out.write(f"- Total elapsed seconds: `{data.get('elapsed_seconds_total')}`\n")
-
-              raw_retention = data.get("raw_retention") or {}
-              if raw_retention:
-                  out.write(f"- Raw retention mode: `{raw_retention.get('mode')}`\n")
-                  out.write(f"- Raw retention status: `{raw_retention.get('status')}`\n")
-
-                  archive = raw_retention.get("archive") or {}
-                  purge = raw_retention.get("purge") or {}
-
-                  if archive:
-                      out.write(f"- Archived raw docs: `{archive.get('total_written')}`\n")
-
-                  if purge:
-                      out.write(f"- Purged raw docs: `{purge.get('deleted_total')}`\n")
-
               out.write("\n")
           PY
 
-      - name: Enforce alert conditions
+      - name: Enforce refresh alert conditions
         if: always()
         shell: bash
         run: |
@@ -238,23 +210,22 @@ jobs:
           import json
           from pathlib import Path
 
-          metrics_path = Path("pdb-pipeline/web_run_metrics.json")
+          metrics_path = Path("pdb-etl/artifacts/lead_scoring_refresh_metrics.json")
           if not metrics_path.exists():
-              raise SystemExit("pdb-pipeline/web_run_metrics.json was not created")
+              raise SystemExit("pdb-etl/artifacts/lead_scoring_refresh_metrics.json was not created")
 
           data = json.loads(metrics_path.read_text(encoding="utf-8"))
 
           if str(data.get("status")).lower() != "completed":
-              raise SystemExit(f"Run status is not completed: {data.get('status')}")
+              raise SystemExit(f"Lead scoring refresh status is not completed: {data.get('status')}")
           PY
 
-      - name: Upload run artifacts
+      - name: Upload refresh artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-web-company-run-artifacts
+          name: daily-lead-scoring-refresh-artifacts
           if-no-files-found: ignore
           path: |
-            pdb-pipeline/web_run.log
-            pdb-pipeline/web_run_metrics.json
-            pdb-pipeline/artifacts/raw_archives
+            pdb-etl/artifacts/lead_scoring_refresh.log
+            pdb-etl/artifacts/lead_scoring_refresh_metrics.json

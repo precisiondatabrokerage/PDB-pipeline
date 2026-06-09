@@ -1,13 +1,13 @@
-name: Daily Web Company Run
+name: Daily Web Company Run - TN Middle West Home Services
 
 on:
   # DISABLED - TO ENABLE UNCOMMENT TWO LINES BELOW THIS
   # schedule:
-  #   - cron: "15 13 * * *"
+  #   - cron: "45 11 * * *"
   workflow_dispatch:
 
 concurrency:
-  group: daily-web-company-run
+  group: daily-web-company-run-tn-middle-west
   cancel-in-progress: true
 
 permissions:
@@ -16,6 +16,8 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   APP_ENV: production
+  ACTIVE_MODE: campaign
+  ACTIVE_SCRAPER_PRESET: tn_middle_west_home_services
   SUPABASE_POSTGRES_URL: ${{ secrets.SUPABASE_POSTGRES_URL }}
   MONGODB_URI: ${{ secrets.MONGODB_URI }}
   MONGODB_DB: ${{ secrets.MONGODB_DB }}
@@ -70,10 +72,14 @@ jobs:
             exit 1
           fi
 
-      - name: Debug ETL repo value
+      - name: Debug run configuration
         shell: bash
         run: |
           echo "PDB_ETL_REPOSITORY=${{ vars.PDB_ETL_REPOSITORY }}"
+          echo "ACTIVE_MODE=${ACTIVE_MODE}"
+          echo "ACTIVE_SCRAPER_PRESET=${ACTIVE_SCRAPER_PRESET}"
+          echo "WEB_EXPANSION_LIMIT=${WEB_EXPANSION_LIMIT:-}"
+          echo "WEB_CONTACT_LIMIT=${WEB_CONTACT_LIMIT:-}"
 
       - name: Preflight check ETL repo access
         shell: bash
@@ -92,8 +98,6 @@ jobs:
             cat /tmp/repo_check.json
             exit 1
           fi
-
-          cat /tmp/repo_check.json
 
       - name: Checkout PDB-etl
         uses: actions/checkout@v4
@@ -159,7 +163,7 @@ jobs:
           client.close()
           PY
 
-      - name: Run daily web/company orchestrator
+      - name: Run TN middle/west web/company orchestrator
         shell: bash
         working-directory: pdb-pipeline
         run: |
@@ -169,7 +173,7 @@ jobs:
           CONTACT_LIMIT="${WEB_CONTACT_LIMIT:-250}"
 
           python -u -m runners.run_web_company_end_to_end \
-            --trigger github_actions_schedule \
+            --trigger github_actions_tn_middle_west_home_services \
             --expansion-limit "${EXPANSION_LIMIT}" \
             --contact-limit "${CONTACT_LIMIT}" \
             --raw-retention-mode archive-then-purge \
@@ -191,7 +195,7 @@ jobs:
           metrics_path = Path("pdb-pipeline/web_run_metrics.json")
 
           with open(summary_path, "a", encoding="utf-8") as out:
-              out.write("## Daily Web Company Run\n\n")
+              out.write("## Daily Web Company Run - TN Middle West Home Services\n\n")
 
               if not metrics_path.exists():
                   out.write("No metrics file was produced.\n")
@@ -252,7 +256,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-web-company-run-artifacts
+          name: tn-middle-west-web-company-run-artifacts
           if-no-files-found: ignore
           path: |
             pdb-pipeline/web_run.log
